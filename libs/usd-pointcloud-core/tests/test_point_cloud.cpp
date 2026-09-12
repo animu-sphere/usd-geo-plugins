@@ -99,6 +99,11 @@ void TestMultiScanContract() {
     collection.bounds.maximum.x = 5.0;
     Check(collection.IsValid());
 
+    second.asset.reference.epsgCode = 4979;
+    collection.scans[1] = second;
+    Check(!collection.IsValid());
+
+    second.asset.reference = reference;
     second.id = first.id;
     collection.scans[1] = second;
     Check(!collection.IsValid());

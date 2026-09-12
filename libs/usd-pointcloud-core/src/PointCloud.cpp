@@ -157,6 +157,18 @@ namespace {
 
 constexpr double kPoseTolerance = 1.0e-9;
 
+bool HasSameGeoReference(const usdgeo::GeoReference& first,
+                const usdgeo::GeoReference& second) {
+    return first.epsgCode == second.epsgCode && first.wkt == second.wkt &&
+        first.projJson == second.projJson &&
+        first.linearUnit == second.linearUnit &&
+        first.sourceUpAxis == second.sourceUpAxis &&
+        first.stageUpAxis == second.stageUpAxis &&
+        first.localOrigin.x == second.localOrigin.x &&
+        first.localOrigin.y == second.localOrigin.y &&
+        first.localOrigin.z == second.localOrigin.z;
+}
+
 bool IsRigidPose(const std::array<double, 16>& pose) {
     if (!std::all_of(pose.begin(), pose.end(),
                      [](double value) { return std::isfinite(value); }) ||
@@ -252,7 +264,9 @@ bool PointCloudCollection::IsValid() const noexcept {
     }
     std::set<std::string> ids;
     for (const auto& scan : scans) {
-        if (!scan.IsValid() || !ids.insert(scan.id).second ||
+        if (!scan.IsValid() ||
+            !HasSameGeoReference(reference, scan.asset.reference) ||
+            !ids.insert(scan.id).second ||
             !ContainsTransformedBounds(bounds, scan)) {
             return false;
         }
