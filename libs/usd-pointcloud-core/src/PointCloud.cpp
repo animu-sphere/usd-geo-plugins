@@ -1,6 +1,7 @@
 #include "usdpointcloud/PointCloud.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <set>
 
@@ -150,6 +151,113 @@ bool PointData::IsValid() const noexcept {
 bool PointCloudAsset::IsValid() const noexcept {
     return reference.IsValid() && bounds.IsValid() && data.IsValid() &&
            chunk.IsValid() && chunk.pointCount == data.positions.size();
+}
+
+namespace {
+
+constexpr double kPoseTolerance = 1.0e-9;
+
+bool IsRigidPose(const std::array<double, 16>& pose) {
+    if (!std::all_of(pose.begin(), pose.end(),
+                     [](double value) { return std::isfinite(value); }) ||
+        std::abs(pose[12]) > kPoseTolerance ||
+        std::abs(pose[13]) > kPoseTolerance ||
+        std::abs(pose[14]) > kPoseTolerance ||
+        std::abs(pose[15] - 1.0) > kPoseTolerance) {
+        return false;
+    }
+
+    const auto dot = [&](int firstRow, int secondRow) {
+        double result = 0.0;
+        for (int column = 0; column != 3; ++column) {
+            result += pose[firstRow * 4 + column] *
+                      pose[secondRow * 4 + column];
+        }
+        return result;
+    };
+    for (int row = 0; row != 3; ++row) {
+        if (std::abs(dot(row, row) - 1.0) > kPoseTolerance) {
+            return false;
+        }
+        for (int otherRow = row + 1; otherRow != 3; ++otherRow) {
+            if (std::abs(dot(row, otherRow)) > kPoseTolerance) {
+                return false;
+            }
+        }
+    }
+
+    const auto determinant =
+        pose[0] * (pose[5] * pose[10] - pose[6] * pose[9]) -
+        pose[1] * (pose[4] * pose[10] - pose[6] * pose[8]) +
+        pose[2] * (pose[4] * pose[9] - pose[5] * pose[8]);
+    return std::abs(determinant - 1.0) <= kPoseTolerance;
+}
+
+usdgeo::Vec3d ApplyPose(const std::array<double, 16>& pose,
+                        const usdgeo::Vec3d& point) {
+    return {pose[0] * point.x + pose[1] * point.y + pose[2] * point.z +
+                pose[3],
+            pose[4] * point.x + pose[5] * point.y + pose[6] * point.z +
+                pose[7],
+            pose[8] * point.x + pose[9] * point.y + pose[10] * point.z +
+                pose[11]};
+}
+
+bool ContainsTransformedBounds(const usdgeo::SpatialBounds& container,
+                               const PointCloudScan& scan) {
+    for (int x = 0; x != 2; ++x) {
+        for (int y = 0; y != 2; ++y) {
+            for (int z = 0; z != 2; ++z) {
+                const usdgeo::Vec3d corner{
+                    x == 0 ? scan.asset.bounds.minimum.x
+                           : scan.asset.bounds.maximum.x,
+                    y == 0 ? scan.asset.bounds.minimum.y
+                           : scan.asset.bounds.maximum.y,
+                    z == 0 ? scan.asset.bounds.minimum.z
+                           : scan.asset.bounds.maximum.z};
+                const auto transformed = ApplyPose(scan.pose, corner);
+                const auto tolerance = 1.0e-9 *
+                    (std::max)({1.0, std::abs(container.minimum.x),
+                                std::abs(container.minimum.y),
+                                std::abs(container.minimum.z),
+                                std::abs(container.maximum.x),
+                                std::abs(container.maximum.y),
+                                std::abs(container.maximum.z),
+                                std::abs(transformed.x),
+                                std::abs(transformed.y),
+                                std::abs(transformed.z)});
+                if (transformed.x < container.minimum.x - tolerance ||
+                    transformed.y < container.minimum.y - tolerance ||
+                    transformed.z < container.minimum.z - tolerance ||
+                    transformed.x > container.maximum.x + tolerance ||
+                    transformed.y > container.maximum.y + tolerance ||
+                    transformed.z > container.maximum.z + tolerance) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool PointCloudScan::IsValid() const noexcept {
+    return !id.empty() && asset.IsValid() && IsRigidPose(pose);
+}
+
+bool PointCloudCollection::IsValid() const noexcept {
+    if (!reference.IsValid() || !bounds.IsValid() || scans.empty()) {
+        return false;
+    }
+    std::set<std::string> ids;
+    for (const auto& scan : scans) {
+        if (!scan.IsValid() || !ids.insert(scan.id).second ||
+            !ContainsTransformedBounds(bounds, scan)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 PointChunk MakePointChunk(const PointData& data,

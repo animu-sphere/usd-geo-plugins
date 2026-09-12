@@ -5,8 +5,9 @@
 `usdPointCloudCore` defines the format-independent point-cloud contracts every
 reader produces and the authoring library consumes: the attribute schema, the
 chunk and asset shapes, read options, deterministic sampling, and the shared
-LOD value types. It is the seam that lets LAS and LAZ — and later COPC, PLY,
-and E57 — reach OpenUSD through one path instead of one writer per format.
+LOD value types, and multi-scan collection values. It is the seam that lets
+LAS and LAZ — and later COPC, PLY, and E57 — reach OpenUSD through one path
+instead of one writer per format.
 
 CMake package `usdPointCloudCore`, target `usdpointcloud::core`, C++ namespace
 `usdpointcloud`.
@@ -18,6 +19,10 @@ CMake package `usdPointCloudCore`, target `usdpointcloud::core`, C++ namespace
 - `PointData` — the parallel per-attribute arrays, including RGB, NIR, GPS
   time, waveform packet fields, and named scalar Extra Bytes columns.
 - `PointCloudAsset` — a `GeoReference`, bounds, chunk, and data together.
+- `PointCloudScan` — a named asset and its row-major rigid scan-to-collection
+  pose.
+- `PointCloudCollection` — shared georeference and bounds for multiple scans;
+  collection bounds must contain every pose-transformed scan bound.
 - `MakePointChunk`, which derives a chunk schema from populated `PointData`.
 - Point data validation: array lengths agree, values are finite, the schema
   matches what is populated.
@@ -44,7 +49,7 @@ CMake package `usdPointCloudCore`, target `usdpointcloud::core`, C++ namespace
 ## Public API
 
 ```text
-usdpointcloud/PointCloud.h           attributes, chunks, data, assets, read options
+usdpointcloud/PointCloud.h           attributes, chunks, data, assets, scans, read options
 usdpointcloud/Lod.h                  tile ids, LOD items, hierarchies, validation
 usdpointcloud/Sampling.h             deterministic sampling and LOD asset building
 usdpointcloud/FileFormatArguments.h  argument parsing, normalization, attribute selection
@@ -89,6 +94,11 @@ PointChunk (+ GeoReference, SpatialBounds)  ->  PointCloudAsset
 PointLodHierarchy + per-level PointCloudAsset
     v
 usdPointCloudAuthoring
+
+E57 Data3D scans
+  | per-scan asset, bounds, attributes, and pose
+  v
+PointCloudCollection
 ```
 
 Sampling preserves source order and applies the same selected indices to every
@@ -147,6 +157,8 @@ ctest --test-dir build -C Release -R usdPointCloudCore_unit --output-on-failure
   so adding an attribute is a source change in this module.
 - The whole-cloud shape (`PointCloudAsset`) still assumes the data fits in
   memory; format readers expose the bounded-memory path through `PointStream`.
+- E57 decoding and multi-scan OpenUSD authoring are not implemented yet; the
+  collection types only establish the format-independent contract.
 
 ## Planned work
 

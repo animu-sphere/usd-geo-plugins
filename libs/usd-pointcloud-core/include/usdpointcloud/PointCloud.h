@@ -4,6 +4,7 @@
 #include "usdgeo/GeoReference.h"
 #include "usdgeo/SpatialBounds.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -80,6 +81,26 @@ struct PointCloudAsset {
     usdgeo::SpatialBounds bounds = usdgeo::SpatialBounds::Empty();
     PointChunk chunk;
     PointData data;
+
+    bool IsValid() const noexcept;
+};
+
+struct PointCloudScan {
+    std::string id;
+    PointCloudAsset asset;
+    std::array<double, 16> pose{
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0};
+
+    bool IsValid() const noexcept;
+};
+
+struct PointCloudCollection {
+    usdgeo::GeoReference reference;
+    usdgeo::SpatialBounds bounds = usdgeo::SpatialBounds::Empty();
+    std::vector<PointCloudScan> scans;
 
     bool IsValid() const noexcept;
 };

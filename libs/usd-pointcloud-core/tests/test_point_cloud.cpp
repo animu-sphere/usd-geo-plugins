@@ -69,6 +69,49 @@ void TestPointDataAndAssetChunk() {
     Check(!data.IsValid());
 }
 
+void TestMultiScanContract() {
+    usdgeo::GeoReference reference;
+    reference.epsgCode = 4978;
+    reference.localOrigin = {10.0, 20.0, 30.0};
+
+    usdpointcloud::PointData data;
+    data.positions = {{1.0, 2.0, 3.0}};
+    usdgeo::SpatialBounds bounds;
+    bounds.Expand(data.positions.front());
+
+    usdpointcloud::PointCloudScan first;
+    first.id = "scan-1";
+    first.asset = {reference, bounds,
+                   usdpointcloud::MakePointChunk(data, bounds), data};
+    Check(first.IsValid());
+
+    usdpointcloud::PointCloudScan second = first;
+    second.id = "scan-2";
+    second.pose[3] = 4.0;
+    Check(second.IsValid());
+
+    usdpointcloud::PointCloudCollection collection;
+    collection.reference = reference;
+    collection.bounds = bounds;
+    collection.scans = {first, second};
+    Check(!collection.IsValid());
+
+    collection.bounds.maximum.x = 5.0;
+    Check(collection.IsValid());
+
+    second.id = first.id;
+    collection.scans[1] = second;
+    Check(!collection.IsValid());
+
+    collection.scans[1] = first;
+    collection.scans[1].pose[15] = 2.0;
+    Check(!collection.scans[1].IsValid());
+
+    collection.scans[1] = first;
+    collection.scans[1].pose[0] = 0.5;
+    Check(!collection.scans[1].IsValid());
+}
+
 void TestExtraByteNameNormalization() {
     const auto names = usdpointcloud::NormalizeExtraByteNames(
         {"air temperature", "2nd-return", "intensity", "air-temperature",
@@ -487,6 +530,7 @@ int main() {
     TestAttributesAndChunks();
     TestInvalidChunk();
     TestPointDataAndAssetChunk();
+    TestMultiScanContract();
     TestExtraByteNameNormalization();
     TestReadOptions();
     TestPointStreamContract();
