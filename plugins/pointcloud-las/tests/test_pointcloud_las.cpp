@@ -91,6 +91,20 @@ std::vector<std::uint8_t> MakeFixture() {
     return bytes;
 }
 
+// Tiled reads publish their payloads in a directory of their own below the
+// requested one, so tests find a payload by name.
+bool HasPayload(const std::filesystem::path& directory, const std::string& name) {
+    std::error_code error;
+    for (std::filesystem::recursive_directory_iterator entry(directory, error),
+         end;
+         !error && entry != end; entry.increment(error)) {
+        if (entry->path().filename() == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void TestFileFormatIntegration() {
     const auto plugInfo = std::filesystem::path(USDGEOLAS_SOURCE_DIR) /
                           "plugin" / "resources" / "pointcloud-las" /
@@ -203,21 +217,26 @@ void TestFileFormatIntegration() {
         {"tile", "true"},
         {"tileMemoryLimit", "1"},
         {"tileSize", "1"}};
-    const auto tiledLayer = pxr::SdfLayer::FindOrOpen(
-        path.string(), tiledArguments);
-    Check(tiledLayer);
-    const auto tiledStage = pxr::UsdStage::Open(tiledLayer);
-    Check(tiledStage);
-    Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
-              "/PointCloud/Tiles/Tile_L0_p1000_p2000_p0/LOD0"))
-              .IsValid());
-    Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
-              "/PointCloud/Tiles/Tile_L0_p1001_p2001_p0/LOD0"))
-              .IsValid());
-    Check(std::filesystem::exists(
-        tiledPayloadDirectory / "Tile_L0_p1000_p2000_p0_LOD0.usdc"));
-    Check(std::filesystem::exists(
-        tiledPayloadDirectory / "Tile_L0_p1001_p2001_p0_LOD0.usdc"));
+    // The second open reads the layer again once the first is released, over
+    // the payloads the first open generated.
+    for (int open = 0; open < 2; ++open) {
+        const auto tiledLayer = pxr::SdfLayer::FindOrOpen(
+            path.string(), tiledArguments);
+        Check(tiledLayer);
+        const auto tiledStage = pxr::UsdStage::Open(tiledLayer);
+        Check(tiledStage);
+        Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
+                  "/PointCloud/Tiles/Tile_L0_p1000_p2000_p0/LOD0"))
+                  .IsValid());
+        Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
+                  "/PointCloud/Tiles/Tile_L0_p1001_p2001_p0/LOD0"))
+                  .IsValid());
+        Check(HasPayload(tiledPayloadDirectory,
+                         "Tile_L0_p1000_p2000_p0_LOD0.usdc"));
+        Check(HasPayload(tiledPayloadDirectory,
+                         "Tile_L0_p1001_p2001_p0_LOD0.usdc"));
+    }
+    Check(!pxr::SdfLayer::Find(path.string(), tiledArguments));
     std::filesystem::remove_all(tiledPayloadDirectory);
 
     const auto metadataLayer =

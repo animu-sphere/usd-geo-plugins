@@ -49,7 +49,9 @@ the plugin bundles require OpenUSD.
 The plugins depend on a small, stable part of the API:
 
 - `SdfFileFormat`, `SdfLayer`, and `SdfFileFormat::FindByExtension("usda")`
-- `UsdStage::Open` on an anonymous layer, then `SdfLayer::TransferContent`
+- `UsdStage::CreateInMemory` with `UsdStage::LoadNone`, then
+  `SdfLayer::TransferContent` into the layer being read; payload files are
+  built in in-memory layers and written with `SdfLayer::Export`
 - `UsdGeomPoints`, `UsdGeomSetStageUpAxis`, `UsdGeomSetStageMetersPerUnit`
 - `TfType` registration through `TF_REGISTRY_FUNCTION` and
   `SDF_DEFINE_FILE_FORMAT`

@@ -30,6 +30,26 @@ void Check(bool condition) {
     }
 }
 
+// Every file named `name` below `directory`.
+std::vector<std::filesystem::path> FindFiles(
+    const std::filesystem::path& directory, const std::string& name) {
+    std::vector<std::filesystem::path> matches;
+    for (const auto& entry :
+         std::filesystem::recursive_directory_iterator(directory)) {
+        if (entry.is_regular_file() && entry.path().filename() == name) {
+            matches.push_back(entry.path());
+        }
+    }
+    return matches;
+}
+
+std::string ReadBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    Check(input.good());
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+}
+
 std::string FormatDouble(double value) {
     std::ostringstream result;
     result << std::setprecision(17) << value;
@@ -197,8 +217,15 @@ void TestPointCloudCacheMissAndMaterialization() {
         reference, request, "las-reader-1", hit, errorMessage));
     Check(hit);
     Check(errorMessage.empty());
-    const auto requestedPayload = testRoot / "requested_payloads" / "tile.usdc";
-    Check(std::filesystem::exists(requestedPayload));
+    // The copy lands in the layer's own directory under the requested one,
+    // in a generation named by the cache entry.
+    const auto requestedPayloads = testRoot / "requested_payloads";
+    const auto materialized = FindFiles(requestedPayloads, "tile.usdc");
+    Check(materialized.size() == 1);
+    const auto requestedPayload = materialized.front();
+    const auto generation = requestedPayload.parent_path();
+    Check(generation.filename().string().rfind("c-", 0) == 0);
+    Check(generation.parent_path().parent_path() == requestedPayloads);
 
     const auto cachedPrim = requestedLayer->GetPrimAtPath(
         pxr::SdfPath("/PointCloud/Tile"));
@@ -206,17 +233,56 @@ void TestPointCloudCacheMissAndMaterialization() {
     const auto payloadItems = cachedPrim->GetPayloadList().GetPrependedItems();
     Check(payloadItems.size() == 1);
     Check(payloadItems.front().GetAssetPath() ==
-            "../requested_payloads/tile.usdc");
+          "../requested_payloads/" +
+              generation.parent_path().filename().generic_string() + "/" +
+              generation.filename().generic_string() + "/tile.usdc");
 
-    const auto requestedStage = pxr::UsdStage::Open(requestedLayer);
-    Check(requestedStage);
-    const auto requestedPoints = pxr::UsdGeomPoints::Get(
-        requestedStage, pxr::SdfPath("/PointCloud/Tile/Points"));
-    Check(requestedPoints.GetPrim().IsValid());
-    pxr::VtVec3fArray requestedPositions;
-    Check(requestedPoints.GetPointsAttr().Get(&requestedPositions));
-    Check(requestedPositions.size() == 1 &&
-          requestedPositions[0] == pxr::GfVec3f(1.0f, 2.0f, 3.0f));
+    {
+        const auto requestedStage = pxr::UsdStage::Open(requestedLayer);
+        Check(requestedStage);
+        const auto requestedPoints = pxr::UsdGeomPoints::Get(
+            requestedStage, pxr::SdfPath("/PointCloud/Tile/Points"));
+        Check(requestedPoints.GetPrim().IsValid());
+        pxr::VtVec3fArray requestedPositions;
+        Check(requestedPoints.GetPointsAttr().Get(&requestedPositions));
+        Check(requestedPositions.size() == 1 &&
+              requestedPositions[0] == pxr::GfVec3f(1.0f, 2.0f, 3.0f));
+    }
+
+    const auto loadRequested = [&]() {
+        const auto layer =
+            pxr::SdfLayer::CreateAnonymous("requested-again.usda");
+        bool loadedHit = false;
+        std::string loadError;
+        Check(usdgeo::TryLoadPointCloudCache(
+            layer.operator->(), resolverIdentity, sourcePath.parent_path(),
+            reference, request, "las-reader-1", loadedHit, loadError));
+        Check(loadError.empty());
+        return loadedHit;
+    };
+
+    // An intact copy from an earlier hit is reused without being written.
+    const auto materializedWrite =
+        std::filesystem::last_write_time(requestedPayload);
+    Check(loadRequested());
+    Check(FindFiles(requestedPayloads, "tile.usdc") == materialized);
+    Check(std::filesystem::last_write_time(requestedPayload) ==
+          materializedWrite);
+
+    // A damaged copy is replaced by a fresh one from the cache.
+    std::ofstream(requestedPayload, std::ios::binary | std::ios::trunc)
+        << "damaged";
+    Check(loadRequested());
+    Check(FindFiles(requestedPayloads, "tile.usdc") == materialized);
+    Check(ReadBytes(requestedPayload) == ReadBytes(payloadPath));
+
+    // A file someone else placed in the requested directory is never
+    // touched, because the layer's copies live in its own directory.
+    std::ofstream(requestedPayloads / "tile.usdc", std::ios::binary)
+        << "user payload";
+    Check(loadRequested());
+    Check(ReadBytes(requestedPayloads / "tile.usdc") == "user payload");
+    Check(ReadBytes(requestedPayload) == ReadBytes(payloadPath));
 
     std::error_code error;
     std::filesystem::remove(layout.manifest, error);

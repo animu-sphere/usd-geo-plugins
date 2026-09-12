@@ -9,6 +9,7 @@ find_package(pxr CONFIG REQUIRED)
 
 add_library(usdPointCloudAuthoring STATIC
     src/ArAssetRandomAccessSource.cpp
+    src/PayloadGeneration.cpp
     src/PointCloudCache.cpp
     src/PointCloudLayer.cpp
     src/PointCloudStreaming.cpp)

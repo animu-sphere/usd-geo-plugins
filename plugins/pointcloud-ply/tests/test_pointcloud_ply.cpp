@@ -103,8 +103,15 @@ void TestFileFormatIntegration() {
     Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
               "/PointCloud/Tiles/Tile_L0_p0_p0_p0/LOD0"))
               .IsValid());
-    Check(std::filesystem::exists(
-        tiledPayloadDirectory / "Tile_L0_p0_p0_p0_LOD0.usdc"));
+    // The layer publishes its payloads in a directory of its own below the
+    // requested one.
+    bool hasPayload = false;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             tiledPayloadDirectory)) {
+        hasPayload = hasPayload ||
+                     entry.path().filename() == "Tile_L0_p0_p0_p0_LOD0.usdc";
+    }
+    Check(hasPayload);
     std::filesystem::remove_all(tiledPayloadDirectory);
 }
 

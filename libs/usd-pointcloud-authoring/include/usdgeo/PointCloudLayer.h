@@ -131,7 +131,26 @@ struct PointCloudPayloadOptions {
     std::vector<usdpointcloud::PointTileManifestEntry>* tileManifestEntries =
         nullptr;
     usdpointcloud::SpoolIoStats* spoolIoStats = nullptr;
+    // Identity of the layer the generated payloads belong to. When empty the
+    // payload directory is exclusive: payloads are written straight into it
+    // and any existing payload path refuses the write. When set, payloads
+    // live in `directory/<owner key>/<generation>/`, where the owner key is a
+    // hash of this value: each generation is staged privately and published
+    // whole, identical content reuses the published generation, and
+    // superseded generations of the same owner are removed. Nothing outside
+    // the owner's directory is touched, and the value is never persisted.
+    std::string owner;
 };
+
+// The payload owner for a FileFormat read: which source the layer reads and
+// the layer's file-format arguments exactly as it holds them. A local source
+// is named relative to the payload directory, so a project that moves as a
+// whole keeps its owner; any other source is named by its resolved
+// identifier.
+std::string PointCloudPayloadOwner(
+    const std::string& source,
+    const std::filesystem::path& payloadDirectory,
+    const pxr::SdfLayer::FileFormatArguments& arguments);
 
 bool AuthorPointCloudTiledAssetFromStream(
     pxr::SdfLayer* layer,
@@ -173,5 +192,15 @@ bool AuthorPointCloudTiledAssetWithPayloads(
     const std::vector<PointCloudTileAsset>& tiles,
     const PointCloudPayloadOptions& options,
     std::vector<std::filesystem::path>& generatedPayloads);
+
+// Authors the payload-backed tiles into a detached stage and transfers the
+// result into `layer`. On failure the layer is unchanged, nothing this call
+// wrote remains, and `diagnostics` explains why.
+bool AuthorPointCloudTiledAssetWithPayloads(
+    pxr::SdfLayer* layer,
+    const std::string& primPath,
+    const std::vector<PointCloudTileAsset>& tiles,
+    const PointCloudPayloadOptions& options,
+    std::vector<usdgeo::Diagnostic>& diagnostics);
 
 } // namespace usdgeo

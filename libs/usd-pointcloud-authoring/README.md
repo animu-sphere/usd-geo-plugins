@@ -30,7 +30,8 @@ namespace `usdgeo`.
   index.
 - Tiled authoring: one deterministic `usdLod` root per tile.
 - Payload-backed tile assets: one USDC payload per tile and LOD level, with
-  portable relative asset paths.
+  portable relative asset paths, and ownership of the generated payload set
+  when the caller names an owner.
 - Layer- and stage-level validation, and the typed
   `PointCloudAuthorFailure` a caller maps onto its own codes.
 
@@ -61,7 +62,7 @@ usdgeo/PointCloudCache.h
 | Metadata only | `AuthorPointCloudMetadata`, `PointCloudSourceMetadata` |
 | LOD | `AuthorPointCloudLodAsset` |
 | Tiling | `PointCloudTileAsset`, `AuthorPointCloudTiledAsset` |
-| Payloads | `PointCloudPayloadOptions`, `AuthorPointCloudTiledAssetWithPayloads` |
+| Payloads | `PointCloudPayloadOptions`, `AuthorPointCloudTiledAssetWithPayloads` (stage and layer overloads), `PointCloudPayloadOwner` |
 | Generated cache | `TryBuildPointCloudCacheLayout`, `TryLoadPointCloudCache`, `TryBuildResolverSourceIdentity` |
 | Failure kinds | `PointCloudAuthorFailure` (`InvalidLayer`, `StageCreation`, `StageMetrics`, `PointCloud`) |
 
@@ -139,6 +140,28 @@ One caller-side note that belongs to the bundles rather than to this module:
 thread-local state, so a bundle that authors a detached stage and transfers its
 content must do so on the same thread that will hand the result back.
 
+The layer overloads build content in an in-memory stage opened with
+`UsdStage::LoadNone` and transfer it into the caller's layer. Nothing is
+loaded, so a payload arc is never resolved or opened while its layer is being
+built, and no layer is renamed to anchor one: the caller's layer keeps its
+identifier throughout, and the detached stage never takes a file identity.
+Each payload file is built in an in-memory layer and written with
+`SdfLayer::Export`, so writing it never registers a layer under the payload
+path.
+
+`PointCloudPayloadOptions::owner` decides where payload files go. Left empty,
+the payload directory is exclusive: payloads are written straight into it and
+any existing payload path refuses the write, which is what
+`usd-pointcloud-convert` relies on. Set, typically to
+`PointCloudPayloadOwner(resolvedPath, payloadDirectory, arguments)`, payloads
+go to `<directory>/<owner key>/<generation>/`. A generation is staged in a
+private directory and published by renaming it into place, so a published one
+is never modified: a failure removes only the staging directory, identical
+content reuses the published generation, and changed content is published
+beside it before the superseded one is removed. Nothing outside the owner's
+directory is touched. The layout is stated in the
+[file-format argument contract](../../docs/architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership).
+
 ## Coordinate-space assumptions
 
 Input positions are **source-space** `usdgeo::Vec3d`. This module applies
@@ -179,6 +202,12 @@ ctest --test-dir build/cy2026-windows-x86_64-py313-usd -C Release `
 - Sampling is fixed-stride, inherited from `usdPointCloudCore`.
 - Payload working-set behavior is unmeasured: the library emits payloads, but
   no claim is made that a non-selected LOD child's payload stays unloaded.
+- A superseded generation is removed on a best-effort basis. On a platform
+  that refuses to delete an open file, such as Windows, files another stage
+  still holds stay until a later read of the same layer removes them.
+- Generating payloads needs write access to the payload directory even when
+  the content turns out unchanged; only a cache hit whose copy is already
+  published reads a directory without writing to it.
 - `AuthorPointCloudTiledAssetFromStream` consumes a pull stream, spools points
   by source tile, and reconstructs one tile at a time before payload authoring.
   The router overload also accepts a planned `PointBudgetTileRouter`, allowing

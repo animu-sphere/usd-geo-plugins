@@ -1,5 +1,9 @@
 #include "usdgeo/PointCloudCache.h"
+#include "usdgeo/CacheKey.h"
+#include "usdgeo/PointCloudLayer.h"
 #include "usdpointcloud/Tiling.h"
+
+#include "PayloadGeneration.h"
 
 #include <pxr/usd/sdf/payload.h>
 #include <pxr/usd/sdf/primSpec.h>
@@ -7,7 +11,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <iomanip>
-#include <set>
+#include <map>
 #include <sstream>
 #include <vector>
 
@@ -162,14 +166,42 @@ bool ValidateCachedPayloads(
     return valid;
 }
 
+// A copy published under an entry's key holds that entry's bytes, so it is
+// reused as long as every payload is still there at its cached size.
+bool HoldsCachedCopy(
+    const std::filesystem::path& generation,
+    const std::map<std::string, std::filesystem::path>& files) {
+    for (const auto& [name, sourcePath] : files) {
+        std::error_code status;
+        const auto target = generation / std::filesystem::path(name);
+        if (!std::filesystem::is_regular_file(target, status) || status) {
+            return false;
+        }
+        const auto targetSize = std::filesystem::file_size(target, status);
+        if (status) {
+            return false;
+        }
+        const auto sourceSize = std::filesystem::file_size(sourcePath, status);
+        if (status || targetSize != sourceSize) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Copies the cached payloads into the owner's directory under a generation
+// named by the cache entry. An intact copy from an earlier hit is reused
+// without writing anything, and a new copy is staged and published whole,
+// so no payload another stage has open is ever modified.
 bool MaterializePayloads(
     const pxr::SdfLayerHandle& layer,
     const usdgeo::cache::Layout& layout,
-    const std::filesystem::path& targetDirectory) {
+    const std::filesystem::path& targetDirectory,
+    const std::string& owner,
+    std::filesystem::path& materializedDirectory) {
     const auto sourceDirectory = layout.payloadDirectory.lexically_normal();
-    const auto normalizedTarget = targetDirectory.lexically_normal();
 
-    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> files;
+    std::map<std::string, std::filesystem::path> files;
     bool valid = true;
     layer->Traverse(pxr::SdfPath::AbsoluteRootPath(),
                     [&](const pxr::SdfPath& path) {
@@ -188,20 +220,15 @@ bool MaterializePayloads(
                 const std::filesystem::path sourcePath =
                     (layout.entryDirectory / assetPath).lexically_normal();
                 if (std::filesystem::path(assetPath).is_absolute() ||
-                    !IsWithin(sourcePath, sourceDirectory)) {
+                    !IsWithin(sourcePath, sourceDirectory) ||
+                    !IsValidCachedPayloadPath(sourcePath, sourceDirectory)) {
                     valid = false;
                     return;
                 }
-                const auto relative =
-                    sourcePath.lexically_relative(sourceDirectory);
-                const auto targetPath =
-                    (normalizedTarget / relative).lexically_normal();
-                if (!IsValidCachedPayloadPath(sourcePath,
-                                              sourceDirectory)) {
-                    valid = false;
-                    return;
-                }
-                files.emplace_back(sourcePath, targetPath);
+                files.emplace(
+                    sourcePath.lexically_relative(sourceDirectory)
+                        .generic_string(),
+                    sourcePath);
             }
         };
         collect(payloads.GetExplicitItems());
@@ -213,37 +240,43 @@ bool MaterializePayloads(
         return false;
     }
 
-    std::set<std::filesystem::path> createdFiles;
-    std::error_code error;
-    for (const auto& [sourcePath, targetPath] : files) {
-        static_cast<void>(sourcePath);
-        const auto targetExists = std::filesystem::exists(targetPath, error);
-        if (error || (targetExists &&
-                      !std::filesystem::is_regular_file(targetPath, error)) ||
-            error) {
-            valid = false;
-            break;
-        }
-        if (targetExists) {
-            continue;
-        }
-        std::filesystem::create_directories(targetPath.parent_path(), error);
-        if (error || !std::filesystem::copy_file(
-                         sourcePath, targetPath,
-                         std::filesystem::copy_options::none, error) ||
-            error) {
-            valid = false;
-            break;
-        }
-        createdFiles.insert(targetPath);
+    const auto generationName = detail::CachedGenerationName(StableCacheKey(
+        {{"cacheEntry",
+          layout.entryDirectory.parent_path().filename().generic_string() +
+              "/" + layout.entryDirectory.filename().generic_string()}}));
+    const auto published =
+        detail::PayloadGeneration::OwnerDirectory(
+            targetDirectory.lexically_normal(), owner) /
+        generationName;
+    if (HoldsCachedCopy(published, files)) {
+        materializedDirectory = published;
+        return true;
     }
-    if (!valid) {
-        for (const auto& path : createdFiles) {
-            std::filesystem::remove(path, error);
-            error.clear();
+
+    std::vector<std::string> names;
+    names.reserve(files.size());
+    for (const auto& entry : files) {
+        names.push_back(entry.first);
+    }
+    detail::PayloadGeneration generation(targetDirectory, owner);
+    std::string error;
+    if (!generation.Begin(names, error)) {
+        return false;
+    }
+    for (const auto& [name, sourcePath] : files) {
+        const auto target = generation.PathFor(name);
+        std::error_code status;
+        std::filesystem::create_directories(target.parent_path(), status);
+        if (status || !std::filesystem::copy_file(sourcePath, target, status) ||
+            status) {
+            return false;
         }
     }
-    return valid;
+    if (!generation.CommitAs(generationName, error)) {
+        return false;
+    }
+    materializedDirectory = published;
+    return true;
 }
 
 void RebasePayloads(pxr::SdfLayer* layer,
@@ -345,38 +378,15 @@ bool TryBuildPointCloudCacheLayout(
     return true;
 }
 
-bool TryLoadPointCloudCache(
-    pxr::SdfLayer* layer,
-    const std::filesystem::path& sourcePath,
-    const GeoReference& reference,
-    const usdpointcloud::PointReadRequest& request,
-    const std::string& parserVersion,
-    bool& hit,
-    std::string& errorMessage,
-    cache::CacheDecision* decision) {
-    hit = false;
-    if (!layer) {
-        errorMessage = "cache lookup requires a writable layer";
-        return false;
-    }
-    if (PointCloudCacheRootFromEnvironment().empty()) {
-        return true;
-    }
+namespace {
 
-    usdgeo::cache::SourceIdentity sourceIdentity;
-    if (!usdgeo::cache::TryBuildLocalSourceIdentity(
-            sourcePath, sourceIdentity, errorMessage)) {
-        return false;
-    }
-    return TryLoadPointCloudCache(
-        layer, sourceIdentity, sourcePath.parent_path(), reference, request,
-        parserVersion, hit, errorMessage, decision);
-}
-
-bool TryLoadPointCloudCache(
+// `ownerSource` names the source the way the FileFormat read that generates
+// payloads does, so materialized payloads land in that layer's own directory.
+bool LoadPointCloudCache(
     pxr::SdfLayer* layer,
     const cache::SourceIdentity& sourceIdentity,
     const std::filesystem::path& payloadBaseDirectory,
+    const std::string& ownerSource,
     const GeoReference& reference,
     const usdpointcloud::PointReadRequest& request,
     const std::string& parserVersion,
@@ -446,10 +456,16 @@ bool TryLoadPointCloudCache(
         std::error_code error;
         targetPayloadDirectory =
             std::filesystem::absolute(targetPayloadDirectory, error);
-        if (error || !MaterializePayloads(
-                         cachedLayer, layout, targetPayloadDirectory)) {
+        std::filesystem::path materializedDirectory;
+        if (error ||
+            !MaterializePayloads(
+                cachedLayer, layout, targetPayloadDirectory,
+                PointCloudPayloadOwner(ownerSource, targetPayloadDirectory,
+                                       layer->GetFileFormatArguments()),
+                materializedDirectory)) {
             return true;
         }
+        targetPayloadDirectory = materializedDirectory;
     }
     layer->TransferContent(cachedLayer);
     const auto layerBaseDirectory =
@@ -462,6 +478,53 @@ bool TryLoadPointCloudCache(
     hit = true;
     report(usdgeo::cache::CacheDecision::Hit);
     return true;
+}
+
+} // namespace
+
+bool TryLoadPointCloudCache(
+    pxr::SdfLayer* layer,
+    const std::filesystem::path& sourcePath,
+    const GeoReference& reference,
+    const usdpointcloud::PointReadRequest& request,
+    const std::string& parserVersion,
+    bool& hit,
+    std::string& errorMessage,
+    cache::CacheDecision* decision) {
+    hit = false;
+    if (!layer) {
+        errorMessage = "cache lookup requires a writable layer";
+        return false;
+    }
+    if (PointCloudCacheRootFromEnvironment().empty()) {
+        return true;
+    }
+
+    usdgeo::cache::SourceIdentity sourceIdentity;
+    if (!usdgeo::cache::TryBuildLocalSourceIdentity(
+            sourcePath, sourceIdentity, errorMessage)) {
+        return false;
+    }
+    return LoadPointCloudCache(
+        layer, sourceIdentity, sourcePath.parent_path(),
+        sourcePath.string(), reference,
+        request, parserVersion, hit, errorMessage, decision);
+}
+
+bool TryLoadPointCloudCache(
+    pxr::SdfLayer* layer,
+    const cache::SourceIdentity& sourceIdentity,
+    const std::filesystem::path& payloadBaseDirectory,
+    const GeoReference& reference,
+    const usdpointcloud::PointReadRequest& request,
+    const std::string& parserVersion,
+    bool& hit,
+    std::string& errorMessage,
+    cache::CacheDecision* decision) {
+    return LoadPointCloudCache(
+        layer, sourceIdentity, payloadBaseDirectory,
+        sourceIdentity.identifier, reference,
+        request, parserVersion, hit, errorMessage, decision);
 }
 
 } // namespace usdgeo
