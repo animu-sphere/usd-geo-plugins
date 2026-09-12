@@ -203,21 +203,26 @@ void TestFileFormatIntegration() {
         {"tile", "true"},
         {"tileMemoryLimit", "1"},
         {"tileSize", "1"}};
-    const auto tiledLayer = pxr::SdfLayer::FindOrOpen(
-        path.string(), tiledArguments);
-    Check(tiledLayer);
-    const auto tiledStage = pxr::UsdStage::Open(tiledLayer);
-    Check(tiledStage);
-    Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
-              "/PointCloud/Tiles/Tile_L0_p1000_p2000_p0/LOD0"))
-              .IsValid());
-    Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
-              "/PointCloud/Tiles/Tile_L0_p1001_p2001_p0/LOD0"))
-              .IsValid());
-    Check(std::filesystem::exists(
-        tiledPayloadDirectory / "Tile_L0_p1000_p2000_p0_LOD0.usdc"));
-    Check(std::filesystem::exists(
-        tiledPayloadDirectory / "Tile_L0_p1001_p2001_p0_LOD0.usdc"));
+    // The second open reads the layer again once the first is released, over
+    // the payloads the first open generated.
+    for (int open = 0; open < 2; ++open) {
+        const auto tiledLayer = pxr::SdfLayer::FindOrOpen(
+            path.string(), tiledArguments);
+        Check(tiledLayer);
+        const auto tiledStage = pxr::UsdStage::Open(tiledLayer);
+        Check(tiledStage);
+        Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
+                  "/PointCloud/Tiles/Tile_L0_p1000_p2000_p0/LOD0"))
+                  .IsValid());
+        Check(tiledStage->GetPrimAtPath(pxr::SdfPath(
+                  "/PointCloud/Tiles/Tile_L0_p1001_p2001_p0/LOD0"))
+                  .IsValid());
+        Check(std::filesystem::exists(
+            tiledPayloadDirectory / "Tile_L0_p1000_p2000_p0_LOD0.usdc"));
+        Check(std::filesystem::exists(
+            tiledPayloadDirectory / "Tile_L0_p1001_p2001_p0_LOD0.usdc"));
+    }
+    Check(!pxr::SdfLayer::Find(path.string(), tiledArguments));
     std::filesystem::remove_all(tiledPayloadDirectory);
 
     const auto metadataLayer =

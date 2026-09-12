@@ -63,7 +63,7 @@ canonical map that participates in layer identity.
 | `tile` | `true` | Routes the pull stream into source-coordinate tile payloads |
 | `tileSize` | positive source units | Fixed-grid tile width and depth |
 | `tileMemoryLimit` | positive bytes | Per-tile spool buffer limit |
-| `payloadDirectory` | path | Directory for generated USDC payloads |
+| `payloadDirectory` | path | Directory for generated USDC payloads; reading the layer again replaces the payloads it generated there and refuses any other file; see [payload ownership](../../docs/architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership) |
 
 ```bash
 usdcat "sample.las:SDF_FORMAT_ARGS:lod=balanced&attributes=xyz,rgb"

@@ -401,6 +401,30 @@ Phase 6 — validation and baselines:
       Stable resolver identities publish and reuse generated entries; unstable
       and unavailable identities convert without cache publication.
 
+#### Generated-layer ownership
+
+The [ecosystem strategy](../design/ECOSYSTEM_STRATEGY.md) asks that temporary
+generated USD be reduced where in-memory layers are practical, and that the
+ownership, paths, crash recovery, and test isolation of generated files that
+remain be explicit.
+
+- [x] Build layer content in in-memory stages that load nothing, so a read
+      never resolves the payloads it is generating, and stop renaming caller
+      or scratch layers to anchor payload paths. Tiled COPC reads no longer
+      report `Could not open asset` for their own payloads.
+- [x] Move COPC native-hierarchy tiled authoring onto a layer-level shared
+      entry point, so no adapter creates a stage or transfers layer content
+- [x] Record ownership of FileFormat-generated payloads by layer identity.
+      Reading a tiled layer again regenerates its own payloads instead of
+      failing on them, a file it did not generate still refuses the write, and
+      an interrupted read leaves files the next read replaces; see
+      [payload ownership](../architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership)
+- [x] Apply the same ownership to generated-cache materialization, replacing
+      stale owned payloads instead of keeping whatever file is already present
+- [ ] Give tile spools an owned, recoverable working location instead of
+      timestamped directories in the system temporary directory, which an
+      interrupted process leaves behind
+
 #### Research - runtime streaming (no release gate)
 
 - [x] Add an opt-in COPC runtime-streaming probe that takes a requested node

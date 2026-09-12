@@ -1,7 +1,8 @@
 #include "usdgeo/PointCloudLayer.h"
 
+#include "TiledPayloadAuthoring.h"
+
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
@@ -30,37 +31,6 @@ namespace {
 bool IsValidPrimPath(const std::string& primPath) {
     return !primPath.empty() && primPath.front() == '/';
 }
-
-class ScopedLayerIdentifier final {
-public:
-    ScopedLayerIdentifier(const pxr::SdfLayerHandle& layer,
-                          const std::string& identifier)
-        : layer_(layer),
-          originalIdentifier_(layer ? layer->GetIdentifier() : std::string()),
-          changed_(layer_ && !layer_->IsAnonymous()) {
-        if (changed_) {
-                        const auto temporaryIdentifier =
-                                identifier + ".usdgeo-authoring-" +
-                                std::to_string(++sequence_);
-                        layer_->SetIdentifier(temporaryIdentifier);
-        }
-    }
-
-    ~ScopedLayerIdentifier() {
-        if (changed_) {
-            layer_->SetIdentifier(originalIdentifier_);
-        }
-    }
-
-    ScopedLayerIdentifier(const ScopedLayerIdentifier&) = delete;
-    ScopedLayerIdentifier& operator=(const ScopedLayerIdentifier&) = delete;
-
-private:
-    pxr::SdfLayerHandle layer_;
-    std::string originalIdentifier_;
-    bool changed_ = false;
-    inline static std::atomic_uint64_t sequence_{0};
-};
 
 bool SameBounds(const usdgeo::SpatialBounds& left,
                 const usdgeo::SpatialBounds& right) {
@@ -144,14 +114,21 @@ std::string TilePrimName(const usdpointcloud::PointTileId& id) {
            "_" + axisName(id.y) + "_" + axisName(id.z);
 }
 
+// Where a payload-backed LOD root writes its payload files. Every path it
+// writes has already been claimed by `payloads`.
+struct PayloadTarget {
+    const std::filesystem::path& directory;
+    const std::filesystem::path& rootLayerPath;
+    detail::GeneratedPayloadSet& payloads;
+};
+
 bool AuthorLodRoot(
     const pxr::UsdStageRefPtr& stage,
     const std::string& primPath,
     const std::vector<usdpointcloud::PointCloudAsset>& levels,
     const usdpointcloud::PointLodHierarchy& hierarchy,
     const pxr::SdfPath& heuristicPath,
-    const std::filesystem::path* payloadDirectory = nullptr,
-    const std::filesystem::path* rootLayerPath = nullptr) {
+    const PayloadTarget* payloadTarget = nullptr) {
     if (!stage || !IsValidPrimPath(primPath) ||
         levels.size() != hierarchy.items.size()) {
         return false;
@@ -174,7 +151,7 @@ bool AuthorLodRoot(
         const auto& level = levels[index];
         const auto lodName = "LOD" + std::to_string(index);
         const auto lodPath = primPath + "/" + lodName;
-        if (payloadDirectory == nullptr) {
+        if (payloadTarget == nullptr) {
             if (!AuthorPointCloudAsset(stage, lodPath, level.reference,
                                        level.bounds, level.chunk, level.data)) {
                 return false;
@@ -182,23 +159,31 @@ bool AuthorLodRoot(
             continue;
         }
 
-        const auto payloadPath = *payloadDirectory /
+        const auto payloadPath = payloadTarget->directory /
             (primPath.substr(primPath.find_last_of('/') + 1) + "_" +
              lodName + ".usdc");
         std::error_code relativeError;
         const auto payloadIdentifier = std::filesystem::relative(
-            payloadPath, rootLayerPath->parent_path(), relativeError);
+            payloadPath, payloadTarget->rootLayerPath.parent_path(),
+            relativeError);
         if (relativeError || payloadIdentifier.empty() ||
             payloadIdentifier.is_absolute()) {
             return false;
         }
-        const auto payloadStage = pxr::UsdStage::CreateNew(payloadPath.string());
+        // The payload is built in memory and exported, so writing it never
+        // registers a layer under the payload path. A regeneration can then
+        // replace a payload this process still has open.
+        const auto payloadStage =
+            pxr::UsdStage::CreateInMemory("payload.usdc");
         if (!payloadStage || !pxr::UsdGeomXform::Define(
                                   payloadStage, pxr::SdfPath("/" + lodName)) ||
             !AuthorPointCloudAsset(payloadStage, "/" + lodName + "/Points",
                                    level.reference, level.bounds, level.chunk,
-                                   level.data) ||
-            !payloadStage->GetRootLayer()->Save()) {
+                                   level.data)) {
+            return false;
+        }
+        payloadTarget->payloads.MarkWritten(payloadPath);
+        if (!payloadStage->GetRootLayer()->Export(payloadPath.string())) {
             return false;
         }
         const auto lodPrim = pxr::UsdGeomXform::Define(
@@ -253,6 +238,39 @@ bool AuthorScreenSizeHeuristic(
 }
 
 } // namespace
+
+namespace detail {
+
+pxr::UsdStageRefPtr CreateDetachedStage() {
+    return pxr::UsdStage::CreateInMemory(pxr::UsdStage::LoadNone);
+}
+
+std::filesystem::path TilePayloadPath(const std::filesystem::path& directory,
+                                      const usdpointcloud::PointTileId& id,
+                                      std::size_t lodIndex) {
+    return directory /
+           (TilePrimName(id) + "_LOD" + std::to_string(lodIndex) + ".usdc");
+}
+
+std::vector<std::filesystem::path> TilePayloadPaths(
+    const std::filesystem::path& directory,
+    const std::vector<PointCloudTileAsset>& tiles) {
+    std::vector<std::filesystem::path> paths;
+    for (const auto& tile : tiles) {
+        for (std::size_t index = 0; index < tile.levels.size(); ++index) {
+            paths.push_back(TilePayloadPath(directory, tile.tile.id, index));
+        }
+    }
+    return paths;
+}
+
+} // namespace detail
+
+std::string PointCloudPayloadOwner(
+    const std::string& resolvedPath,
+    const usdpointcloud::PointReadRequest& request) {
+    return resolvedPath + "?" + request.normalizedArguments;
+}
 
 pxr::UsdStageRefPtr PointCloudLayer::CreateStage() {
     return pxr::UsdStage::CreateInMemory();
@@ -323,7 +341,7 @@ bool AuthorPointCloudAsset(
         return false;
     }
 
-    const auto stage = PointCloudLayer::CreateStage();
+    const auto stage = detail::CreateDetachedStage();
     if (!stage) {
         failure = PointCloudAuthorFailure::StageCreation;
         return false;
@@ -636,7 +654,7 @@ bool AuthorPointCloudMetadata(
         return false;
     }
 
-    const auto stage = PointCloudLayer::CreateStage();
+    const auto stage = detail::CreateDetachedStage();
     if (!stage || !pxr::UsdGeomSetStageUpAxis(
                       stage, pxr::TfToken(reference.stageUpAxis)) ||
         !pxr::UsdGeomSetStageMetersPerUnit(stage, 1.0)) {
@@ -750,7 +768,7 @@ bool AuthorPointCloudLodAsset(
     if (!layer || levels.empty() || !levels.front().reference.IsValid()) {
         return false;
     }
-    const auto stage = PointCloudLayer::CreateStage();
+    const auto stage = detail::CreateDetachedStage();
     if (!stage || !pxr::UsdGeomSetStageUpAxis(
                       stage, pxr::TfToken(levels.front().reference.stageUpAxis)) ||
         !pxr::UsdGeomSetStageMetersPerUnit(stage, 1.0) ||
@@ -824,12 +842,13 @@ bool AuthorPointCloudTiledAssetWithPayloads(
         stage, primPath, tiles, options, generatedPayloads);
 }
 
-bool AuthorPointCloudTiledAssetWithPayloads(
-    const pxr::UsdStageRefPtr& stage,
-    const std::string& primPath,
-    const std::vector<PointCloudTileAsset>& tiles,
-    const PointCloudPayloadOptions& options,
-    std::vector<std::filesystem::path>& generatedPayloads) {
+namespace detail {
+
+bool AuthorClaimedTilePayloads(const pxr::UsdStageRefPtr& stage,
+                               const std::string& primPath,
+                               const std::vector<PointCloudTileAsset>& tiles,
+                               const PointCloudPayloadOptions& options,
+                               GeneratedPayloadSet& payloads) {
     if (!stage || !IsValidPrimPath(primPath) || tiles.empty() ||
         options.directory.empty() || options.rootLayerPath.empty()) {
         return false;
@@ -837,59 +856,13 @@ bool AuthorPointCloudTiledAssetWithPayloads(
 
     const std::filesystem::path payloadDirectory(options.directory);
     const std::filesystem::path rootLayerPath(options.rootLayerPath);
-    const auto rootLayer = stage->GetRootLayer();
-    if (!rootLayer) {
-        return false;
-    }
-    std::vector<std::filesystem::path> payloadPaths;
     std::vector<usdpointcloud::PointTileManifestEntry> manifestEntries;
-    std::error_code error;
-    const auto payloadDirectoryExisted =
-        std::filesystem::exists(payloadDirectory, error);
-    if (error) {
-        return false;
-    }
-    std::filesystem::create_directories(payloadDirectory, error);
-    if (error) {
-        return false;
-    }
-
-    const auto cleanup = [&payloadPaths, &payloadDirectory,
-                          payloadDirectoryExisted]() {
-        std::error_code cleanupError;
-        for (const auto& payloadPath : payloadPaths) {
-            std::filesystem::remove(payloadPath, cleanupError);
-            cleanupError.clear();
-        }
-        if (!payloadDirectoryExisted) {
-            const auto empty = std::filesystem::is_empty(
-                payloadDirectory, cleanupError);
-            if (empty && !cleanupError) {
-                std::filesystem::remove(payloadDirectory, cleanupError);
-            }
-        }
-    };
-    for (const auto& tile : tiles) {
-        const auto tilePath = primPath + "/Tiles/" + TilePrimName(tile.tile.id);
-        for (std::size_t index = 0; index < tile.levels.size(); ++index) {
-            const auto payloadPath = payloadDirectory /
-                (tilePath.substr(tilePath.find_last_of('/') + 1) + "_LOD" +
-                 std::to_string(index) + ".usdc");
-            if (std::filesystem::exists(payloadPath)) {
-                cleanup();
-                return false;
-            }
-            payloadPaths.push_back(payloadPath);
-        }
-    }
-
     std::set<std::string> tileNames;
     for (const auto& tile : tiles) {
         std::vector<usdgeo::Diagnostic> diagnostics;
         if (!usdpointcloud::ValidatePointTile(tile.tile, diagnostics) ||
             tile.levels.size() != tile.tile.lod.items.size() ||
             !tileNames.insert(tile.tile.id.ToString()).second) {
-            cleanup();
             return false;
         }
         for (std::size_t index = 0; index < tile.levels.size(); ++index) {
@@ -897,15 +870,13 @@ bool AuthorPointCloudTiledAssetWithPayloads(
             const auto& item = tile.tile.lod.items[index];
             if (!level.IsValid() || level.chunk.pointCount != item.pointCount ||
                 !SameBounds(level.bounds, item.bounds)) {
-                cleanup();
                 return false;
             }
-            const auto payloadPath = payloadPaths[
-                manifestEntries.size()];
+            std::error_code error;
             const auto relativePayloadPath = std::filesystem::relative(
-                payloadPath, rootLayerPath.parent_path(), error);
+                TilePayloadPath(payloadDirectory, tile.tile.id, index),
+                rootLayerPath.parent_path(), error);
             if (error || relativePayloadPath.empty()) {
-                cleanup();
                 return false;
             }
             manifestEntries.push_back({
@@ -921,22 +892,20 @@ bool AuthorPointCloudTiledAssetWithPayloads(
         const usdpointcloud::PointTileManifest tileManifest{manifestEntries};
         if (!usdpointcloud::ValidatePointTileManifest(
                 tileManifest, manifestDiagnostics)) {
-            cleanup();
             return false;
         }
     }
 
-    const ScopedLayerIdentifier scopedRootIdentifier(
-        rootLayer, rootLayerPath.generic_string());
     if (!pxr::UsdGeomXform::Define(stage, pxr::SdfPath(primPath)) ||
         !pxr::UsdGeomScope::Define(
             stage, pxr::SdfPath(primPath + "/LodHeuristics")) ||
         !pxr::UsdGeomScope::Define(
             stage, pxr::SdfPath(primPath + "/Tiles"))) {
-        cleanup();
         return false;
     }
 
+    const PayloadTarget payloadTarget{payloadDirectory, rootLayerPath,
+                                      payloads};
     const auto heuristicPath =
         pxr::SdfPath(primPath + "/LodHeuristics");
     for (const auto& tile : tiles) {
@@ -949,23 +918,104 @@ bool AuthorPointCloudTiledAssetWithPayloads(
             !AuthorScreenSizeHeuristic(
                 stage, tileHeuristicPath, tile.levels.front().reference,
                 tile.tile.bounds, tile.tile.lod.screenSizeThresholds)) {
-            cleanup();
             return false;
         }
         if (!AuthorLodRoot(stage, tilePath.GetString(), tile.levels,
-                           tile.tile.lod, tileHeuristicPath,
-                           &payloadDirectory, &rootLayerPath)) {
-            cleanup();
+                           tile.tile.lod, tileHeuristicPath, &payloadTarget)) {
             return false;
         }
     }
-    generatedPayloads.insert(generatedPayloads.end(), payloadPaths.begin(),
-                             payloadPaths.end());
     if (options.tileManifestEntries) {
         options.tileManifestEntries->insert(
             options.tileManifestEntries->end(), manifestEntries.begin(),
             manifestEntries.end());
     }
+    return true;
+}
+
+} // namespace detail
+
+namespace {
+
+bool AuthorGeneratedTilePayloads(
+    const pxr::UsdStageRefPtr& stage,
+    const std::string& primPath,
+    const std::vector<PointCloudTileAsset>& tiles,
+    const PointCloudPayloadOptions& options,
+    std::vector<std::filesystem::path>& generatedPayloads,
+    std::string& error) {
+    if (!stage || !IsValidPrimPath(primPath) || tiles.empty() ||
+        options.directory.empty() || options.rootLayerPath.empty()) {
+        error = "invalid tiled point-cloud payload request";
+        return false;
+    }
+    const std::filesystem::path payloadDirectory(options.directory);
+    const auto payloadPaths = detail::TilePayloadPaths(payloadDirectory, tiles);
+    detail::GeneratedPayloadSet payloads(payloadDirectory, options.owner);
+    if (!payloads.Claim(payloadPaths, error)) {
+        return false;
+    }
+    if (!detail::AuthorClaimedTilePayloads(stage, primPath, tiles, options,
+                                           payloads)) {
+        error = "unable to author tiled point-cloud payloads";
+        payloads.Rollback();
+        return false;
+    }
+    if (!payloads.Commit(error)) {
+        payloads.Rollback();
+        return false;
+    }
+    generatedPayloads.insert(generatedPayloads.end(), payloadPaths.begin(),
+                             payloadPaths.end());
+    return true;
+}
+
+} // namespace
+
+bool AuthorPointCloudTiledAssetWithPayloads(
+    const pxr::UsdStageRefPtr& stage,
+    const std::string& primPath,
+    const std::vector<PointCloudTileAsset>& tiles,
+    const PointCloudPayloadOptions& options,
+    std::vector<std::filesystem::path>& generatedPayloads) {
+    std::string error;
+    return AuthorGeneratedTilePayloads(stage, primPath, tiles, options,
+                                       generatedPayloads, error);
+}
+
+bool AuthorPointCloudTiledAssetWithPayloads(
+    pxr::SdfLayer* layer,
+    const std::string& primPath,
+    const std::vector<PointCloudTileAsset>& tiles,
+    const PointCloudPayloadOptions& options,
+    std::vector<Diagnostic>& diagnostics) {
+    diagnostics.clear();
+    const auto fail = [&diagnostics](DiagnosticCode code,
+                                     const std::string& message) {
+        diagnostics.push_back(
+            {code, Severity::Error, message, std::nullopt, std::nullopt});
+        return false;
+    };
+    if (!layer || tiles.empty() || tiles.front().levels.empty() ||
+        !tiles.front().levels.front().reference.IsValid()) {
+        return fail(DiagnosticCode::InvalidPointTile,
+                    "invalid tiled point-cloud authoring request");
+    }
+    const auto stage = detail::CreateDetachedStage();
+    if (!stage || !pxr::UsdGeomSetStageUpAxis(
+                      stage, pxr::TfToken(
+                          tiles.front().levels.front().reference.stageUpAxis)) ||
+        !pxr::UsdGeomSetStageMetersPerUnit(stage, 1.0)) {
+        return fail(DiagnosticCode::DecodeFailure,
+                    "unable to create tiled point-cloud stage");
+    }
+    std::vector<std::filesystem::path> generatedPayloads;
+    std::string error;
+    if (!AuthorGeneratedTilePayloads(stage, primPath, tiles, options,
+                                     generatedPayloads, error)) {
+        return fail(DiagnosticCode::DecodeFailure, error);
+    }
+    layer->TransferContent(stage->GetRootLayer());
     return true;
 }
 
@@ -977,7 +1027,7 @@ bool AuthorPointCloudTiledAsset(
         !tiles.front().levels.front().reference.IsValid()) {
         return false;
     }
-    const auto stage = PointCloudLayer::CreateStage();
+    const auto stage = detail::CreateDetachedStage();
     if (!stage || !pxr::UsdGeomSetStageUpAxis(
                       stage, pxr::TfToken(
                           tiles.front().levels.front().reference.stageUpAxis)) ||

@@ -9,6 +9,7 @@
 #include <pxr/base/plug/plugin.h>
 #include <pxr/base/plug/registry.h>
 #include <pxr/base/gf/vec3d.h>
+#include <pxr/base/tf/diagnosticMgr.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/usd/sdf/attributeSpec.h>
 #include <pxr/usd/sdf/fileFormat.h>
@@ -22,6 +23,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -680,6 +683,65 @@ void TestAuthoredLodEquivalence() {
     std::filesystem::remove(copcPath, error);
 }
 
+class WarningCounter final : public pxr::TfDiagnosticMgr::Delegate {
+public:
+    WarningCounter() { pxr::TfDiagnosticMgr::GetInstance().AddDelegate(this); }
+    ~WarningCounter() override {
+        pxr::TfDiagnosticMgr::GetInstance().RemoveDelegate(this);
+    }
+
+    void IssueError(const pxr::TfError&) override {}
+    void IssueFatalError(const pxr::TfCallContext&,
+                         const std::string&) override {
+        _UnhandledAbort();
+    }
+    void IssueStatus(const pxr::TfStatus&) override {}
+    void IssueWarning(const pxr::TfWarning&) override { ++count_; }
+
+    int Count() const noexcept { return count_; }
+
+private:
+    std::atomic_int count_{0};
+};
+
+void TestTiledReadReopens() {
+    const auto directory =
+        std::filesystem::temp_directory_path() /
+        ("usd_copc_tiled_reopen_" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    const auto source = directory / "conformance.copc";
+    Check(std::filesystem::copy_file(
+              std::filesystem::path(USDGEOCOPC_SOURCE_DIR) / "tests" /
+                  "fixtures" / "conformance.copc",
+              source),
+          "copy COPC fixture");
+
+    // The second open reads the layer again once the first is released, over
+    // the payloads the first open generated. Neither open may resolve those
+    // payloads while the layer is being built.
+    const pxr::SdfLayer::FileFormatArguments arguments = {
+        {"payloadDirectory", "payloads"}, {"tile", "true"}, {"tileSize", "1"}};
+    for (int open = 0; open < 2; ++open) {
+        const WarningCounter warnings;
+        const auto layer = pxr::SdfLayer::FindOrOpen(source.string(), arguments);
+        Check(static_cast<bool>(layer), "tiled COPC layer opens");
+        Check(layer->GetPrimAtPath(pxr::SdfPath("/PointCloud/Tiles")) != nullptr,
+              "tiled COPC layer authors tiles");
+        Check(warnings.Count() == 0,
+              "tiled COPC read resolved payloads while authoring");
+    }
+    Check(!pxr::SdfLayer::Find(source.string(), arguments),
+          "tiled COPC layer was released");
+    Check(std::filesystem::exists(directory / "payloads" /
+                                  "Tile_L0_p0_p0_p0_LOD0.usdc"),
+          "tiled COPC payload exists");
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+}
+
 void TestResolverBackedRead() {
     const auto records = MakeEquivalentRecords();
     const auto lazPath = std::filesystem::temp_directory_path() /
@@ -981,6 +1043,7 @@ int main() {
                    "plugInfo.json");
     TestMetadataIntegration();
     TestAuthoredLodEquivalence();
+    TestTiledReadReopens();
     TestResolverBackedRead();
     return 0;
 }

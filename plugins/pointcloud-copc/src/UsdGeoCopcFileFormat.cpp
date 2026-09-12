@@ -16,7 +16,6 @@
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/ar/assetInfo.h>
 #include <pxr/usd/pcp/dynamicFileFormatContext.h>
-#include <pxr/usd/usdGeom/metrics.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -572,13 +571,6 @@ bool UsdGeoCopcFileFormat::Read(SdfLayer* layer,
             return false;
         }
 
-        auto stage = usdgeo::PointCloudLayer::CreateStage();
-        if (!stage || !pxr::UsdGeomSetStageUpAxis(
-                          stage, pxr::TfToken(reference.stageUpAxis)) ||
-            !pxr::UsdGeomSetStageMetersPerUnit(stage, 1.0)) {
-            TF_RUNTIME_ERROR("%s", usdgeocopc::diagnostics::PointCloudAuthorFailed);
-            return false;
-        }
         std::filesystem::path payloadDirectory(request.payloadDirectory);
         if (payloadDirectory.is_relative()) {
             if (!IsLocalFileSource(resolvedPath)) {
@@ -594,15 +586,22 @@ bool UsdGeoCopcFileFormat::Read(SdfLayer* layer,
                 std::filesystem::path(resolvedPath).parent_path() /
                 payloadDirectory;
         }
-        const usdgeo::PointCloudPayloadOptions payloadOptions{
+        usdgeo::PointCloudPayloadOptions payloadOptions{
             payloadDirectory.string(), resolvedPath,
             request.tileMemoryLimitBytes};
+        payloadOptions.owner =
+            usdgeo::PointCloudPayloadOwner(resolvedPath, request);
         if (!usdgeo::AuthorPointCloudTiledAssetWithPayloads(
-                stage, "/PointCloud", tiles, payloadOptions)) {
-            TF_RUNTIME_ERROR("%s", usdgeocopc::diagnostics::PointCloudAuthorFailed);
+                layer, "/PointCloud", tiles, payloadOptions, diagnostics)) {
+            TF_RUNTIME_ERROR("%s", usdgeocopc::diagnostics::Message(
+                                      usdgeocopc::diagnostics::PointCloudAuthorFailed,
+                                      "Unable to author tiled COPC point cloud: " +
+                                          DiagnosticDetail(
+                                              diagnostics,
+                                              "tiled authoring failed"))
+                                      .c_str());
             return false;
         }
-        layer->TransferContent(stage->GetRootLayer());
         return true;
     }
 

@@ -632,7 +632,7 @@ int main(int argc, char** argv) {
         if (entry.lod != 0) continue;
         const auto entryPayloadPath = outputDirectory / entry.payloadPath;
         std::error_code payloadError;
-        const auto entryPayloadBytes = std::filesystem::file_size(
+        const std::uint64_t entryPayloadBytes = std::filesystem::file_size(
             entryPayloadPath, payloadError);
         if (payloadError) continue;
         ++tileManifestCount;

@@ -1,8 +1,9 @@
 #include "usdgeo/PointCloudLayer.h"
 
+#include "TiledPayloadAuthoring.h"
+
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -232,8 +233,6 @@ struct TileSpool {
     std::unique_ptr<usdpointcloud::TileSpoolWriter> writer;
 };
 
-std::atomic_uint64_t streamLayerSequence{0};
-
 } // namespace
 
 bool AuthorPointCloudTiledAssetFromStream(
@@ -257,16 +256,12 @@ bool AuthorPointCloudTiledAssetFromStream(
     if (spoolDirectory.empty()) return false;
     std::map<std::string, TileSpool> spools;
     std::size_t bufferedBytes = 0;
-    std::vector<std::filesystem::path> generatedPayloads;
+    detail::GeneratedPayloadSet payloads(options.directory, options.owner);
     const auto cleanup = [&]() {
         for (auto& entry : spools) entry.second.writer.reset();
         std::vector<Diagnostic> cleanupDiagnostics;
         usdpointcloud::RemoveSpoolDirectory(spoolDirectory, cleanupDiagnostics);
-        std::error_code cleanupError;
-        for (const auto& payloadPath : generatedPayloads) {
-            std::filesystem::remove(payloadPath, cleanupError);
-            cleanupError.clear();
-        }
+        payloads.Rollback();
     };
     const auto isCancelled = [&]() {
         return options.isCancelled && options.isCancelled();
@@ -408,8 +403,29 @@ bool AuthorPointCloudTiledAssetFromStream(
             return false;
         }
     }
+    if (spools.empty()) {
+        AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                 "point stream did not produce any points");
+        cleanup();
+        return false;
+    }
 
-    const auto stage = PointCloudLayer::CreateStage();
+    // The tile set is known once the stream is spooled, so every payload
+    // path is claimed before the first payload is written.
+    std::vector<std::filesystem::path> payloadPaths;
+    payloadPaths.reserve(spools.size());
+    for (const auto& entry : spools) {
+        payloadPaths.push_back(
+            detail::TilePayloadPath(options.directory, entry.second.id, 0));
+    }
+    std::string payloadError;
+    if (!payloads.Claim(payloadPaths, payloadError)) {
+        AddError(diagnostics, DiagnosticCode::DecodeFailure, payloadError);
+        cleanup();
+        return false;
+    }
+
+    const auto stage = detail::CreateDetachedStage();
     if (!stage || !pxr::UsdGeomSetStageUpAxis(
                       stage, pxr::TfToken(reference.stageUpAxis)) ||
         !pxr::UsdGeomSetStageMetersPerUnit(stage, 1.0)) {
@@ -418,12 +434,7 @@ bool AuthorPointCloudTiledAssetFromStream(
         cleanup();
         return false;
     }
-    const auto streamLayerIdentifier =
-        options.rootLayerPath + ".usdgeo-stream-" +
-        std::to_string(++streamLayerSequence);
-    stage->GetRootLayer()->SetIdentifier(streamLayerIdentifier);
 
-    std::size_t tileCount = 0;
     for (const auto& entry : spools) {
         if (isCancelled()) {
             AddError(diagnostics, DiagnosticCode::DecodeFailure,
@@ -441,6 +452,7 @@ bool AuthorPointCloudTiledAssetFromStream(
         usdpointcloud::SpoolSchema tileSchema;
         if (!reader.Open(entry.second.path, tileId, tileSchema, diagnostics,
                  options.spoolIoStats) ||
+            tileId.ToString() != entry.first ||
             !SameSchema(schema, tileSchema)) {
             AddError(diagnostics, DiagnosticCode::DecodeFailure,
                      "unable to reopen point tile spool");
@@ -497,8 +509,8 @@ bool AuthorPointCloudTiledAssetFromStream(
         tile.levels.push_back(std::move(asset));
         std::vector<PointCloudTileAsset> singleTile;
         singleTile.push_back(std::move(tile));
-        if (!AuthorPointCloudTiledAssetWithPayloads(
-                stage, primPath, singleTile, options, generatedPayloads)) {
+        if (!detail::AuthorClaimedTilePayloads(
+                stage, primPath, singleTile, options, payloads)) {
             AddError(diagnostics, DiagnosticCode::DecodeFailure,
                      "unable to author tiled point-cloud payloads");
             return failTile();
@@ -508,19 +520,17 @@ bool AuthorPointCloudTiledAssetFromStream(
                      "point-cloud authoring cancelled");
             return failTile();
         }
-        ++tileCount;
-    }
-    if (tileCount == 0) {
-        AddError(diagnostics, DiagnosticCode::DecodeFailure,
-                 "point stream did not produce any points");
-        cleanup();
-        return false;
     }
     std::vector<Diagnostic> cleanupDiagnostics;
     if (!usdpointcloud::RemoveSpoolDirectory(spoolDirectory,
                                              cleanupDiagnostics)) {
         diagnostics.insert(diagnostics.end(), cleanupDiagnostics.begin(),
                            cleanupDiagnostics.end());
+        cleanup();
+        return false;
+    }
+    if (!payloads.Commit(payloadError)) {
+        AddError(diagnostics, DiagnosticCode::DecodeFailure, payloadError);
         cleanup();
         return false;
     }

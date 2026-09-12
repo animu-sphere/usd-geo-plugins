@@ -27,7 +27,10 @@ while decoded points pass through a bounded buffer. Remote COPC is supported
 only when the active resolver supplies an asset with efficient random-access
 reads, such as HTTP byte-range support. The plugin does not implement an HTTP
 client, transport retries, or a network cache. Remote tiled reads require an
-absolute local `payloadDirectory`.
+absolute local `payloadDirectory`. Reading a tiled layer again replaces the
+payloads it generated there and refuses any other file; the directory records
+ownership under a hash, so no resolver identifier is written. See
+[payload ownership](../../docs/architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership).
 
 Generated-USDC cache lookup is enabled for a stable local filesystem identity
 and for a `Stable` resolver identity. `Unstable` and `Unavailable` identity

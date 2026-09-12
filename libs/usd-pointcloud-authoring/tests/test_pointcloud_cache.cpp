@@ -1,5 +1,7 @@
 #include "usdgeo/PointCloudCache.h"
 
+#include "usdgeo/CacheKey.h"
+#include "usdgeo/PointCloudLayer.h"
 #include "usdgeo/cache/Cache.h"
 #include "usdpointcloud/FileFormatArguments.h"
 
@@ -28,6 +30,13 @@ void Check(bool condition) {
     if (!condition) {
         std::abort();
     }
+}
+
+std::string ReadBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    Check(input.good());
+    return {std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
 }
 
 std::string FormatDouble(double value) {
@@ -208,15 +217,59 @@ void TestPointCloudCacheMissAndMaterialization() {
     Check(payloadItems.front().GetAssetPath() ==
             "../requested_payloads/tile.usdc");
 
-    const auto requestedStage = pxr::UsdStage::Open(requestedLayer);
-    Check(requestedStage);
-    const auto requestedPoints = pxr::UsdGeomPoints::Get(
-        requestedStage, pxr::SdfPath("/PointCloud/Tile/Points"));
-    Check(requestedPoints.GetPrim().IsValid());
-    pxr::VtVec3fArray requestedPositions;
-    Check(requestedPoints.GetPointsAttr().Get(&requestedPositions));
-    Check(requestedPositions.size() == 1 &&
-          requestedPositions[0] == pxr::GfVec3f(1.0f, 2.0f, 3.0f));
+    {
+        const auto requestedStage = pxr::UsdStage::Open(requestedLayer);
+        Check(requestedStage);
+        const auto requestedPoints = pxr::UsdGeomPoints::Get(
+            requestedStage, pxr::SdfPath("/PointCloud/Tile/Points"));
+        Check(requestedPoints.GetPrim().IsValid());
+        pxr::VtVec3fArray requestedPositions;
+        Check(requestedPoints.GetPointsAttr().Get(&requestedPositions));
+        Check(requestedPositions.size() == 1 &&
+              requestedPositions[0] == pxr::GfVec3f(1.0f, 2.0f, 3.0f));
+    }
+
+    // Materialized payloads belong to the layer they were materialized for:
+    // a later hit replaces them when they are stale, and never overwrites a
+    // file someone else placed.
+    const auto requestedOwnerRecord =
+        requestedPayload.parent_path() /
+        ("payload-owner-" +
+         usdgeo::StableCacheKey(
+             {{"payloadOwner", usdgeo::PointCloudPayloadOwner(
+                                   resolverIdentity.identifier, request)}}) +
+         ".manifest");
+    Check(std::filesystem::exists(requestedOwnerRecord));
+    const auto cachedPayloadBytes = ReadBytes(payloadPath);
+    const auto loadRequested = [&]() {
+        const auto layer =
+            pxr::SdfLayer::CreateAnonymous("requested-again.usda");
+        bool loadedHit = false;
+        std::string loadError;
+        Check(usdgeo::TryLoadPointCloudCache(
+            layer.operator->(), resolverIdentity, sourcePath.parent_path(),
+            reference, request, "las-reader-1", loadedHit, loadError));
+        Check(loadError.empty());
+        return loadedHit;
+    };
+    std::ofstream(requestedPayload, std::ios::binary | std::ios::trunc)
+        << "stale payload";
+    Check(loadRequested());
+    Check(ReadBytes(requestedPayload) == cachedPayloadBytes);
+
+    std::filesystem::remove(requestedOwnerRecord);
+    std::ofstream(requestedPayload, std::ios::binary | std::ios::trunc)
+        << "user payload";
+    Check(!loadRequested());
+    Check(ReadBytes(requestedPayload) == "user payload");
+
+    // A file that already holds the cached bytes is taken over, so payloads
+    // materialized before ownership was recorded keep resolving.
+    Check(std::filesystem::copy_file(
+        payloadPath, requestedPayload,
+        std::filesystem::copy_options::overwrite_existing));
+    Check(loadRequested());
+    Check(std::filesystem::exists(requestedOwnerRecord));
 
     std::error_code error;
     std::filesystem::remove(layout.manifest, error);

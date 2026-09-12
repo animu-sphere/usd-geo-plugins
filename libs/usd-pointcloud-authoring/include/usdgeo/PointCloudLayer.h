@@ -1,6 +1,7 @@
 #pragma once
 
 #include "usdgeo/GeoReference.h"
+#include "usdpointcloud/FileFormatArguments.h"
 #include "usdpointcloud/PointCloud.h"
 #include "usdpointcloud/Lod.h"
 #include "usdpointcloud/Spool.h"
@@ -131,7 +132,20 @@ struct PointCloudPayloadOptions {
     std::vector<usdpointcloud::PointTileManifestEntry>* tileManifestEntries =
         nullptr;
     usdpointcloud::SpoolIoStats* spoolIoStats = nullptr;
+    // Identity of the layer the generated payloads belong to. When empty the
+    // payload directory is exclusive and any existing payload path refuses
+    // the write. When set, payloads this owner generated before are replaced
+    // and removed as the new generation supersedes them, while any other
+    // existing file still refuses the write. The directory records ownership
+    // under a hash of this value; the value itself is never persisted.
+    std::string owner;
 };
+
+// The payload owner for a FileFormat read: the resolved source and its
+// normalized arguments, which together are the layer's identity.
+std::string PointCloudPayloadOwner(
+    const std::string& resolvedPath,
+    const usdpointcloud::PointReadRequest& request);
 
 bool AuthorPointCloudTiledAssetFromStream(
     pxr::SdfLayer* layer,
@@ -173,5 +187,15 @@ bool AuthorPointCloudTiledAssetWithPayloads(
     const std::vector<PointCloudTileAsset>& tiles,
     const PointCloudPayloadOptions& options,
     std::vector<std::filesystem::path>& generatedPayloads);
+
+// Authors the payload-backed tiles into a detached stage and transfers the
+// result into `layer`. On failure the layer is unchanged, the payloads this
+// call wrote are removed, and `diagnostics` explains why.
+bool AuthorPointCloudTiledAssetWithPayloads(
+    pxr::SdfLayer* layer,
+    const std::string& primPath,
+    const std::vector<PointCloudTileAsset>& tiles,
+    const PointCloudPayloadOptions& options,
+    std::vector<usdgeo::Diagnostic>& diagnostics);
 
 } // namespace usdgeo

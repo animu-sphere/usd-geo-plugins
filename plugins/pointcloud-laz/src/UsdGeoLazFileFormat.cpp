@@ -279,10 +279,18 @@ bool UsdGeoLazFileFormat::Read(SdfLayer* layer,
         usdgeo::PointCloudPayloadOptions payloadOptions{
             payloadDirectory.string(), rootLayerPath,
             request.tileMemoryLimitBytes};
+        payloadOptions.owner =
+            usdgeo::PointCloudPayloadOwner(resolvedPath, request);
         if (!usdgeo::AuthorPointCloudTiledAssetFromStream(
                 layer, "/PointCloud", selected, reference,
                 {request.tileSize, 0}, payloadOptions, diagnostics)) {
-            TF_RUNTIME_ERROR("%s", usdgeolaz::diagnostics::PointCloudAuthorFailed);
+            TF_RUNTIME_ERROR("%s", usdgeolaz::diagnostics::Message(
+                                      usdgeolaz::diagnostics::PointCloudAuthorFailed,
+                                      "Unable to author tiled LAZ point cloud: " +
+                                          DiagnosticDetail(
+                                              diagnostics,
+                                              "tiled authoring failed"))
+                                      .c_str());
             return false;
         }
         return true;

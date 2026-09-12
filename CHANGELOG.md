@@ -8,6 +8,44 @@ All notable changes to this project are documented here.
 
 - Local `.copc` and `.copc.laz` inputs in `usd-pointcloud-convert`, including
   deterministic generated-cache publication and reuse.
+- `PointCloudPayloadOptions::owner`, `PointCloudPayloadOwner`, and a
+  layer-level `AuthorPointCloudTiledAssetWithPayloads` overload that reports
+  typed diagnostics. A payload directory records which layer owns the files it
+  generated in `payload-owner-<key>.manifest`, keyed by a hash of the layer
+  identity. The rule is in the
+  [file-format argument contract](docs/architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership).
+
+### Changed
+
+- Layer authoring builds content in an in-memory stage that loads nothing, and
+  payload files are exported from in-memory layers. No authoring call renames
+  a caller's layer or gives a scratch layer a file identity any more.
+- The COPC adapter authors native-hierarchy tiles through the shared
+  layer-level entry point instead of creating and transferring its own stage.
+- A tiled LAS, LAZ, or COPC read that cannot author reports the reason, such
+  as the payload file it refused to replace, alongside `LAS016`, `LAZ007`, or
+  `COPC007` instead of the bare code. PLY already did so under `PLY007`.
+
+### Fixed
+
+- Reading a tiled LAS, LAZ, PLY, or COPC layer again, for example in a new
+  process or after the first layer was released, no longer fails because the
+  payloads the first read generated already exist. The layer replaces the
+  payloads it owns and still refuses any file it did not generate.
+- Tiled COPC reads no longer warn `Could not open asset` for their own payloads
+  when the working directory differs from the source directory.
+- Materializing a generated-cache hit replaces a stale payload the layer owns
+  instead of keeping it, and never overwrites a file someone else placed.
+- The authoring stream benchmark builds on macOS, where `std::uintmax_t` and
+  `std::uint64_t` are distinct types.
+
+### Compatibility
+
+- Payload directories written by earlier tiled reads carry no ownership
+  record, so a regeneration treats their payloads as foreign and refuses them,
+  as the earlier release already did. Delete such a directory once and the
+  next read generates and owns it. Payloads a cache hit materialized earlier
+  are taken over when they still hold the cached bytes.
 
 ## [0.11.0] - 2026-08-27
 

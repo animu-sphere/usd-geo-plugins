@@ -207,6 +207,8 @@ bool UsdGeoPlyFileFormat::Read(SdfLayer* layer,
         usdgeo::PointCloudPayloadOptions payloadOptions{
             payloadDirectory.string(), resolvedPath,
             request.tileMemoryLimitBytes};
+        payloadOptions.owner =
+            usdgeo::PointCloudPayloadOwner(resolvedPath, request);
         if (!usdgeo::AuthorPointCloudTiledAssetFromStream(
             layer, "/PointCloud", selected, reference,
                 {request.tileSize, 0}, payloadOptions, diagnostics)) {

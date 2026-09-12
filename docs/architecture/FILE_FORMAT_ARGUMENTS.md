@@ -96,7 +96,7 @@ The tiled surface also exposes:
 | `tile` | `true` when tiling is enabled |
 | `tileSize` | Positive source-coordinate tile size |
 | `tileMemoryLimit` | Positive total spool working-set limit in bytes |
-| `payloadDirectory` | Payload output directory |
+| `payloadDirectory` | Payload output directory; see [generated payload ownership](#generated-payload-ownership) |
 
 The explicit `usd-pointcloud-convert` tool additionally accepts the generic
 point-budget arguments `maxPointsPerTile`, `minPointsPerTile`, and `maxDepth`.
@@ -138,6 +138,38 @@ file-format argument and therefore does not affect layer identity or cache
 descriptor identity. When a committed entry exists for the source, normalized
 arguments, and reader metadata, the LAS, LAZ, or COPC adapter loads it before
 point delivery; a miss follows the normal reader and authoring path.
+
+## Generated Payload Ownership
+
+A tiled read writes its payloads into `payloadDirectory` and authors a root
+that references them by relative path. The root lives only in the opened
+layer, so every read of the layer writes the payloads again, by generating
+them or by materializing a cache hit. Ownership of the files in the directory
+is therefore explicit:
+
+- The owner of a payload set is the layer's identity: the resolved source and
+  its normalized arguments. The directory records it in
+  `payload-owner-<key>.manifest`, where `<key>` is a 64-bit hash of that
+  identity. The record lists relative payload names only; no source path,
+  resolver identifier, or validation token is written.
+- Reading the same layer again replaces the payloads that layer generated
+  before and removes those it no longer generates. This is what lets a host
+  reopen or reload a tiled layer.
+- A file the layer did not generate is never replaced. When another source,
+  other arguments, or a user file already holds a payload name, the read fails
+  with the plugin's author-failure code, names the file, and leaves the
+  directory unchanged.
+- Ownership is recorded before the first payload is written, so an
+  interrupted read leaves payloads the next read of the same layer replaces. A
+  read that fails or is cancelled removes the payloads it wrote, restores the
+  previous record, and removes a directory it created.
+- Materializing a committed `USDGEO_CACHE_ROOT` entry into `payloadDirectory`
+  follows the same rule. An existing file that already holds the cached bytes
+  is taken over, so payloads materialized before ownership was recorded keep
+  resolving.
+
+`usd-pointcloud-convert` does not share this rule. Its output root and payload
+directory must not exist yet, and its transaction marker owns recovery.
 
 ## Rules
 
@@ -189,3 +221,6 @@ should not silently change authored output.
 - Conflicting combinations are rejected rather than resolved by precedence.
 - A default-valued argument and an absent argument produce identical layers.
 - LAS and LAZ accept the same arguments with the same meaning.
+- A tiled layer read a second time regenerates over its own payloads, never
+  replaces a file another layer or a user placed, and restores its ownership
+  record when the read fails.

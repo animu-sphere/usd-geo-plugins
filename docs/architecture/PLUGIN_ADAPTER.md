@@ -62,6 +62,11 @@ Both plugins now pass reader output through the shared `usdlas` point-data and
 asset builders, then call the layer-level `usdgeo::AuthorPointCloudAsset`
 entry point. The plugins no longer own point fan-out, chunk schema
 construction, CRS or bounds conversion, stage metrics, or layer transfer.
+COPC native-hierarchy tiles reach the layer-level
+`usdgeo::AuthorPointCloudTiledAssetWithPayloads` entry point the same way, so
+no adapter creates a stage or transfers layer content. Every tiled adapter
+names its layer as the owner of the payloads it generates through
+`usdgeo::PointCloudPayloadOwner`.
 
 ### Consequence
 

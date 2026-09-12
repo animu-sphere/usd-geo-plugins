@@ -270,13 +270,22 @@ The payload writer produces:
 - root `usdLod` metadata;
 - a source fingerprint and the generation settings;
 - tile bounds and point counts;
-- no partially published root asset after failure.
+- no partially published root asset after failure;
+- explicit ownership of the payload files, so a FileFormat read regenerates
+  its own payloads when the layer is read again and never replaces a file it
+  did not generate.
 
 The conversion tool writes the versioned tile manifest only after all payloads
 have been authored successfully. Entries are sorted by tile ID and LOD, and
 portable payload paths, duplicate tile/LOD entries, bounds, and point counts
 are validated before publication. Cache materialization preserves the tile
 manifest beside the cached payloads.
+
+FileFormat reads record which layer owns the payloads in the directory before
+writing the first one, so an interrupted read leaves files the next read of
+the same layer replaces; the rule is in the
+[file-format argument contract](../architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership).
+The plugins never write the root layer of a FileFormat read to disk.
 
 Final output is committed atomically where the filesystem allows it. The
 authored representation stays inside the existing
