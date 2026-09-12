@@ -426,9 +426,10 @@ remain be explicit.
 - [x] Materialize generated-cache hits as a generation named by the cache
       entry, reusing an intact copy without writing and replacing a damaged
       one
-- [ ] Give tile spools an owned, recoverable working location instead of
-      timestamped directories in the system temporary directory, which an
-      interrupted process leaves behind
+- [x] Give tile spools an owned, recoverable working location instead of
+      timestamped directories in the system temporary directory. The authoring
+      options select the workspace, marked leftovers are recovered on the next
+      invocation, and conversion ties the workspace to its transaction marker.
 
 #### Research - runtime streaming (no release gate)
 

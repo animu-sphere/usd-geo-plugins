@@ -125,47 +125,24 @@ std::map<std::string, std::string> ReadDirectoryFiles(
     return files;
 }
 
-std::set<std::filesystem::path> ListPointSpoolDirectories() {
-    std::set<std::filesystem::path> directories;
+bool HasPointSpoolFile(const std::filesystem::path& directory) {
     std::error_code error;
-    const auto temporaryDirectory = std::filesystem::temp_directory_path(error);
-    Check(!error);
+    if (!std::filesystem::is_directory(directory, error)) {
+        Check(!error);
+        return false;
+    }
     for (const auto& entry : std::filesystem::directory_iterator(
-             temporaryDirectory, error)) {
+             directory, error)) {
         Check(!error);
         const auto name = entry.path().filename().string();
-        const auto isDirectory = entry.is_directory(error);
-        Check(!error);
-        if (isDirectory &&
-            name.rfind("usdgeo_point_spool_", 0) == 0) {
-            directories.insert(entry.path());
+        if (entry.is_regular_file(error) && name.rfind("tile_", 0) == 0 &&
+            entry.path().extension() == ".bin") {
+            return true;
         }
+        Check(!error);
         error.clear();
     }
     Check(!error);
-    return directories;
-}
-
-bool HasNewPointSpoolFile(
-    const std::set<std::filesystem::path>& existingDirectories) {
-    for (const auto& directory : ListPointSpoolDirectories()) {
-        if (existingDirectories.count(directory) != 0) continue;
-        std::error_code error;
-        for (const auto& entry : std::filesystem::directory_iterator(
-                 directory, error)) {
-            Check(!error);
-            const auto name = entry.path().filename().string();
-            const auto isRegularFile = entry.is_regular_file(error);
-            Check(!error);
-            if (isRegularFile &&
-                name.rfind("tile_", 0) == 0 &&
-                entry.path().extension() == ".bin") {
-                return true;
-            }
-            error.clear();
-        }
-        Check(!error);
-    }
     return false;
 }
 
@@ -200,9 +177,9 @@ class GeneratedPointStream final : public usdpointcloud::PointStream {
 public:
     GeneratedPointStream(
         std::size_t pointCount,
-        std::set<std::filesystem::path> existingSpoolDirectories)
+        std::filesystem::path spoolDirectory)
         : pointCount_(pointCount),
-          existingSpoolDirectories_(std::move(existingSpoolDirectories)) {}
+          spoolDirectory_(std::move(spoolDirectory)) {}
 
     usdpointcloud::PointStreamStatus ReadNext(
         usdpointcloud::PointChunk& chunk,
@@ -212,8 +189,7 @@ public:
         if (index_ == pointCount_) {
             return usdpointcloud::PointStreamStatus::End;
         }
-        sawSpoolFile_ = sawSpoolFile_ ||
-                        HasNewPointSpoolFile(existingSpoolDirectories_);
+        sawSpoolFile_ = sawSpoolFile_ || HasPointSpoolFile(spoolDirectory_);
         const auto tileIndex = index_ % 32;
         const auto pointInTile = index_ / 32;
         data.positions = {{static_cast<double>(tileIndex * 128 + 1),
@@ -231,7 +207,7 @@ public:
 private:
     std::size_t pointCount_ = 0;
     std::size_t index_ = 0;
-    std::set<std::filesystem::path> existingSpoolDirectories_;
+    std::filesystem::path spoolDirectory_;
     bool sawSpoolFile_ = false;
 };
 
@@ -1080,17 +1056,25 @@ void TestGeneratedStreamTiledPayloadAuthoring() {
     usdgeo::GeoReference reference;
     reference.epsgCode = 26910;
 
-    const auto spoolDirectoriesBefore = ListPointSpoolDirectories();
-    GeneratedPointStream stream(131072, spoolDirectoriesBefore);
     const auto payloadDirectory =
         std::filesystem::temp_directory_path() / "usd_geo_generated_payloads";
     const auto rootLayerPath = payloadDirectory / "PointCloud.usda";
+    const auto spoolDirectory = payloadDirectory / "spool-work";
     std::filesystem::remove_all(payloadDirectory);
+    std::filesystem::create_directories(spoolDirectory);
+    {
+        std::ofstream marker(spoolDirectory / ".usdgeo-spool", std::ios::binary);
+        marker << "USDGEO_SPOOL_WORKSPACE_V1\n";
+        std::ofstream stale(spoolDirectory / "tile_stale.bin");
+        stale << "stale";
+    }
+    GeneratedPointStream stream(131072, spoolDirectory);
     std::vector<usdgeo::Diagnostic> diagnostics;
     std::vector<usdpointcloud::PointTileManifestEntry> manifestEntries;
-    const usdgeo::PointCloudPayloadOptions options{
+    usdgeo::PointCloudPayloadOptions options{
         payloadDirectory.string(), rootLayerPath.string(), 1024, {}, {},
         &manifestEntries};
+    options.spoolDirectory = spoolDirectory.string();
     Check(usdgeo::AuthorPointCloudTiledAssetFromStream(
         layer.operator->(), "/PointCloud", stream, reference, {128.0, 0},
         options, diagnostics));
@@ -1112,7 +1096,7 @@ void TestGeneratedStreamTiledPayloadAuthoring() {
     Check(layer->GetPrimAtPath(pxr::SdfPath(
               "/PointCloud/Tiles/Tile_L0_p31_p0_p0")) != nullptr);
     Check(stream.SawSpoolFile());
-    Check(ListPointSpoolDirectories() == spoolDirectoriesBefore);
+    Check(!std::filesystem::exists(spoolDirectory));
     std::filesystem::remove_all(payloadDirectory);
 }
 
@@ -1131,20 +1115,21 @@ void TestStreamCancellationCleansSpools() {
     const auto payloadDirectory =
         std::filesystem::temp_directory_path() / "usd_geo_cancelled_payloads";
     std::filesystem::remove_all(payloadDirectory);
-    const auto spoolDirectoriesBefore = ListPointSpoolDirectories();
+    const auto spoolDirectory = payloadDirectory / "spool-work";
     int cancellationChecks = 0;
     std::vector<usdgeo::Diagnostic> diagnostics;
-    const usdgeo::PointCloudPayloadOptions options{
+    usdgeo::PointCloudPayloadOptions options{
         payloadDirectory.string(),
         (payloadDirectory / "PointCloud.usda").string(),
         1,
         [&cancellationChecks]() { return ++cancellationChecks >= 3; }};
+    options.spoolDirectory = spoolDirectory.string();
 
     Check(!usdgeo::AuthorPointCloudTiledAssetFromStream(
         layer.operator->(), "/PointCloud", stream, reference, {1.0, 0},
         options, diagnostics));
     Check(!diagnostics.empty());
-    Check(ListPointSpoolDirectories() == spoolDirectoriesBefore);
+    Check(!std::filesystem::exists(spoolDirectory));
     Check(!std::filesystem::exists(payloadDirectory));
 }
 
@@ -1165,20 +1150,21 @@ void TestStreamCancellationDuringSpoolReadCleansSpools() {
         std::filesystem::temp_directory_path() /
         "usd_geo_cancelled_spool_read_payloads";
     std::filesystem::remove_all(payloadDirectory);
-    const auto spoolDirectoriesBefore = ListPointSpoolDirectories();
+    const auto spoolDirectory = payloadDirectory / "spool-work";
     int cancellationChecks = 0;
     std::vector<usdgeo::Diagnostic> diagnostics;
-    const usdgeo::PointCloudPayloadOptions options{
+    usdgeo::PointCloudPayloadOptions options{
         payloadDirectory.string(),
         (payloadDirectory / "PointCloud.usda").string(),
         1,
         [&cancellationChecks]() { return ++cancellationChecks >= 6; }};
+    options.spoolDirectory = spoolDirectory.string();
 
     Check(!usdgeo::AuthorPointCloudTiledAssetFromStream(
         layer.operator->(), "/PointCloud", stream, reference, {1.0, 0},
         options, diagnostics));
     Check(!diagnostics.empty());
-    Check(ListPointSpoolDirectories() == spoolDirectoriesBefore);
+    Check(!std::filesystem::exists(spoolDirectory));
     Check(!std::filesystem::exists(payloadDirectory));
 }
 
