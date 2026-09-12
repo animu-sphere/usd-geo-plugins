@@ -158,15 +158,15 @@ namespace {
 constexpr double kPoseTolerance = 1.0e-9;
 
 bool HasSameGeoReference(const usdgeo::GeoReference& first,
-                const usdgeo::GeoReference& second) {
+                         const usdgeo::GeoReference& second) {
     return first.epsgCode == second.epsgCode && first.wkt == second.wkt &&
-        first.projJson == second.projJson &&
-        first.linearUnit == second.linearUnit &&
-        first.sourceUpAxis == second.sourceUpAxis &&
-        first.stageUpAxis == second.stageUpAxis &&
-        first.localOrigin.x == second.localOrigin.x &&
-        first.localOrigin.y == second.localOrigin.y &&
-        first.localOrigin.z == second.localOrigin.z;
+           first.projJson == second.projJson &&
+           first.linearUnit == second.linearUnit &&
+           first.sourceUpAxis == second.sourceUpAxis &&
+           first.stageUpAxis == second.stageUpAxis &&
+           first.localOrigin.x == second.localOrigin.x &&
+           first.localOrigin.y == second.localOrigin.y &&
+           first.localOrigin.z == second.localOrigin.z;
 }
 
 bool IsRigidPose(const std::array<double, 16>& pose) {
