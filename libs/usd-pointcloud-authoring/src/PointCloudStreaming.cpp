@@ -317,6 +317,9 @@ bool AuthorPointCloudTiledAssetFromStream(
         payloads.Rollback();
         if (!payloadDirectoryExisted) {
             std::error_code removeError;
+            std::filesystem::remove(
+                std::filesystem::path(options.directory) / ".spool",
+                removeError);
             std::filesystem::remove(options.directory, removeError);
         }
     };

@@ -177,9 +177,9 @@ class GeneratedPointStream final : public usdpointcloud::PointStream {
 public:
     GeneratedPointStream(
         std::size_t pointCount,
-                std::filesystem::path spoolDirectory)
+        std::filesystem::path spoolDirectory)
         : pointCount_(pointCount),
-                    spoolDirectory_(std::move(spoolDirectory)) {}
+          spoolDirectory_(std::move(spoolDirectory)) {}
 
     usdpointcloud::PointStreamStatus ReadNext(
         usdpointcloud::PointChunk& chunk,
