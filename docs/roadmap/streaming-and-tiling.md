@@ -256,8 +256,12 @@ The spool system must define:
 - detection of incomplete spools;
 - deterministic iteration order.
 
-Temporary output is isolated in a dedicated working directory and removed on
-successful completion unless a debug-retention option is enabled.
+Temporary output is isolated in a caller-owned dedicated working directory and
+removed on completion. The authoring path writes a marker before creating tile
+spools; a marked directory left by an interrupted process is removed before
+the next run, while an unmarked existing directory is refused. The converter
+places this workspace below its transaction marker so transaction recovery
+owns it as well.
 
 ## 7. Payload output requirements
 

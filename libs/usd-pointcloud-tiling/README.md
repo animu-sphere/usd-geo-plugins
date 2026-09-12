@@ -37,7 +37,11 @@ reject missing or truncated footers. Attribute values are serialized using the
 scalar types declared by the schema. The writer buffers records up to its
 configured byte threshold before flushing; streaming callers may combine
 multiple writers under a total working-set budget. Callers own the working
-directory and can remove it with `RemoveSpoolDirectory`.
+directory and can remove it with `RemoveSpoolDirectory`. The OpenUSD
+authoring bridge places stream spools in a caller-selected directory or an
+owner-scoped `.spool` directory, marks it before writing, and removes a
+marked leftover before the next run so an interrupted process can be
+recovered without scanning the system temporary directory.
 
 `PointTileManifest` records the tile ID, LOD level, source bounds, point count,
 and portable payload path for generated tile assets. Its v1 serializer sorts

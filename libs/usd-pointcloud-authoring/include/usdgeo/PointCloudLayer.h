@@ -140,6 +140,7 @@ struct PointCloudPayloadOptions {
     // superseded generations of the same owner are removed. Nothing outside
     // the owner's directory is touched, and the value is never persisted.
     std::string owner;
+    std::string spoolDirectory;
 };
 
 // The payload owner for a FileFormat read: which source the layer reads and

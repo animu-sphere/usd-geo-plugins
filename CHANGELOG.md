@@ -6,6 +6,10 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Owned, recoverable tile-spool workspaces through
+  `PointCloudPayloadOptions::spoolDirectory`; interrupted marked workspaces
+  are recovered on the next tiled authoring run, and the converter scopes its
+  workspace to the conversion transaction.
 - Local `.copc` and `.copc.laz` inputs in `usd-pointcloud-convert`, including
   deterministic generated-cache publication and reuse.
 - `PointCloudPayloadOptions::owner`, `PointCloudPayloadOwner`, and a

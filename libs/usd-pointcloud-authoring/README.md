@@ -162,6 +162,15 @@ beside it before the superseded one is removed. Nothing outside the owner's
 directory is touched. The layout is stated in the
 [file-format argument contract](../../docs/architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership).
 
+`PointCloudPayloadOptions::spoolDirectory` optionally names the exclusive
+working directory for tiled stream spools. When it is empty, the authoring
+library creates a `.spool` directory below the payload directory, scoped by
+the payload owner when one is present. The directory contains a marker before
+spooling starts; a later invocation removes a marked directory left by an
+interrupted run, and successful or failed authoring removes it on exit. An
+existing directory without the marker is refused so authoring never deletes
+unrelated files.
+
 ## Coordinate-space assumptions
 
 Input positions are **source-space** `usdgeo::Vec3d`. This module applies
@@ -212,6 +221,9 @@ ctest --test-dir build/cy2026-windows-x86_64-py313-usd -C Release `
   by source tile, and reconstructs one tile at a time before payload authoring.
   The router overload also accepts a planned `PointBudgetTileRouter`, allowing
   adaptive leaf plans to use the same bounded spool and payload path.
+  Spools live in the caller-owned `spoolDirectory` or an owner-scoped
+  `.spool` directory below the payload directory; marked leftovers are
+  recovered on the next invocation.
 - Large-corpus RSS measurement for generated, LAS, and LAZ inputs is available
   through the explicit `usdPointCloudAuthoring_stream_benchmark` target. It is
   disabled by default;

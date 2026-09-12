@@ -1,12 +1,13 @@
 #include "usdgeo/PointCloudLayer.h"
 
 #include "TiledPayloadAuthoring.h"
+#include "usdgeo/CacheKey.h"
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -208,23 +209,66 @@ bool PrepareData(const usdpointcloud::SpoolSchema& schema,
     return true;
 }
 
+constexpr char kSpoolMarker[] = "USDGEO_SPOOL_WORKSPACE_V1";
+
 std::filesystem::path MakeSpoolDirectory(
+    const PointCloudPayloadOptions& options,
     std::vector<Diagnostic>& diagnostics) {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const auto base = std::filesystem::temp_directory_path() /
-                      ("usdgeo_point_spool_" + std::to_string(stamp));
-    std::error_code error;
-    for (std::uint32_t suffix = 0; suffix < 1000; ++suffix) {
-        const auto directory = suffix == 0
-                                   ? base
-                                   : std::filesystem::path(
-                                         base.string() + "_" + std::to_string(suffix));
-        if (std::filesystem::create_directory(directory, error)) return directory;
-        error.clear();
+    auto directory = options.spoolDirectory.empty()
+                         ? std::filesystem::path(options.directory) / ".spool"
+                         : std::filesystem::path(options.spoolDirectory);
+    if (options.spoolDirectory.empty() && !options.owner.empty()) {
+        directory /= usdgeo::StableCacheKey({{"payloadOwner", options.owner}});
     }
-    AddError(diagnostics, DiagnosticCode::DecodeFailure,
-             "unable to create point spool directory");
-    return {};
+    if (directory.empty()) {
+        AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                 "unable to determine point spool directory");
+        return {};
+    }
+    std::error_code error;
+    if (std::filesystem::exists(directory, error)) {
+        if (error || !std::filesystem::is_directory(directory, error)) {
+            AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                     "point spool directory is not a directory");
+            return {};
+        }
+        const auto marker = directory / ".usdgeo-spool";
+        std::ifstream markerFile(marker, std::ios::binary);
+        std::string markerValue;
+        const auto markerIsFile =
+            std::filesystem::is_regular_file(marker, error) && !error;
+        const auto markerIsValid = markerIsFile &&
+                                   static_cast<bool>(markerFile) &&
+                                   static_cast<bool>(std::getline(
+                                       markerFile, markerValue)) &&
+                                   markerValue == kSpoolMarker;
+        markerFile.close();
+        if (!markerIsValid) {
+            AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                     "point spool directory is not recoverable");
+            return {};
+        }
+        std::filesystem::remove_all(directory, error);
+        if (error) {
+            AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                     "unable to recover point spool directory");
+            return {};
+        }
+    }
+    std::filesystem::create_directories(directory, error);
+    if (error) {
+        AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                 "unable to create point spool directory");
+        return {};
+    }
+    std::ofstream marker(directory / ".usdgeo-spool", std::ios::binary);
+    if (!marker || !(marker << kSpoolMarker << '\n')) {
+        std::filesystem::remove_all(directory, error);
+        AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                 "unable to initialize point spool directory");
+        return {};
+    }
+    return directory;
 }
 
 struct TileSpool {
@@ -252,7 +296,15 @@ bool AuthorPointCloudTiledAssetFromStream(
         return false;
     }
 
-    const auto spoolDirectory = MakeSpoolDirectory(diagnostics);
+    std::error_code payloadDirectoryError;
+    const auto payloadDirectoryExisted = std::filesystem::exists(
+        std::filesystem::path(options.directory), payloadDirectoryError);
+    if (payloadDirectoryError) {
+        AddError(diagnostics, DiagnosticCode::DecodeFailure,
+                 "unable to inspect point payload directory");
+        return false;
+    }
+    const auto spoolDirectory = MakeSpoolDirectory(options, diagnostics);
     if (spoolDirectory.empty()) return false;
     std::map<std::string, TileSpool> spools;
     std::size_t bufferedBytes = 0;
@@ -263,6 +315,10 @@ bool AuthorPointCloudTiledAssetFromStream(
         std::vector<Diagnostic> cleanupDiagnostics;
         usdpointcloud::RemoveSpoolDirectory(spoolDirectory, cleanupDiagnostics);
         payloads.Rollback();
+        if (!payloadDirectoryExisted) {
+            std::error_code removeError;
+            std::filesystem::remove(options.directory, removeError);
+        }
     };
     const auto isCancelled = [&]() {
         return options.isCancelled && options.isCancelled();

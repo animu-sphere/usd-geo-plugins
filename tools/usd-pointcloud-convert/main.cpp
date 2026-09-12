@@ -1078,10 +1078,11 @@ int main(int argc, char** argv) {
     }
 
     std::vector<usdpointcloud::PointTileManifestEntry> tileManifestEntries;
-    const usdgeo::PointCloudPayloadOptions payloadOptions{
+    usdgeo::PointCloudPayloadOptions payloadOptions{
         generationPayloadDirectory.string(), generationRootPath.string(),
         request.tileMemoryLimitBytes, request.readOptions.isCancelled, {},
         &tileManifestEntries};
+    payloadOptions.spoolDirectory = (transactionPath / "spool").string();
     std::unique_ptr<usdpointcloud::PointStream> plannedStream;
     const auto authored = [&]() {
         if (!request.maxPointsPerTile) {
