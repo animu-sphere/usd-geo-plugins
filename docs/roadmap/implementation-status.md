@@ -192,6 +192,9 @@ transaction state creation and retrying the same output workspace.
       and local COPC reads onto it
 - [x] Add resolver-backed `ArAsset` adaptation without introducing OpenUSD or
       transport dependencies into `usdCopc`
+- [x] Add the format-independent multi-scan collection contract required by
+      E57, including per-scan assets, bounds, attributes, and poses; the E57
+      decoder and multi-scan authoring remain deferred
 
 ### Next release direction
 
