@@ -7,6 +7,12 @@ opens LAS, LAZ, local or resolver-backed COPC, and PLY sources through shared
 point-cloud contracts for surveying, mapping, scanning, and 3D data-exchange
 workflows.
 
+<p align="center">
+  <img src="docs/assets/openLASwithHydraStorm.gif" alt="LAS file preview through Hydra Storm" width="640" />
+  <br>
+  <p align="center"><i>The video shows direct preview of a LAS file through Hydra Storm in usdview.</i></p>
+</p>
+
 **What it does**
 
 - Reads LAS 1.2-1.4 and LAZ point records through format-specific plugins.
