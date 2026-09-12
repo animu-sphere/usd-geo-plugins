@@ -141,35 +141,49 @@ point delivery; a miss follows the normal reader and authoring path.
 
 ## Generated Payload Ownership
 
-A tiled read writes its payloads into `payloadDirectory` and authors a root
+A tiled read writes its payloads below `payloadDirectory` and authors a root
 that references them by relative path. The root lives only in the opened
 layer, so every read of the layer writes the payloads again, by generating
-them or by materializing a cache hit. Ownership of the files in the directory
-is therefore explicit:
+them or by materializing a cache hit. Each layer therefore owns a directory of
+its own:
 
-- The owner of a payload set is the layer's identity: the resolved source and
-  its normalized arguments. The directory records it in
-  `payload-owner-<key>.manifest`, where `<key>` is a 64-bit hash of that
-  identity. The record lists relative payload names only; no source path,
-  resolver identifier, or validation token is written.
-- Reading the same layer again replaces the payloads that layer generated
-  before and removes those it no longer generates. This is what lets a host
-  reopen or reload a tiled layer.
-- A file the layer did not generate is never replaced. When another source,
-  other arguments, or a user file already holds a payload name, the read fails
-  with the plugin's author-failure code, names the file, and leaves the
-  directory unchanged.
-- Ownership is recorded before the first payload is written, so an
-  interrupted read leaves payloads the next read of the same layer replaces. A
-  read that fails or is cancelled removes the payloads it wrote, restores the
-  previous record, and removes a directory it created.
-- Materializing a committed `USDGEO_CACHE_ROOT` entry into `payloadDirectory`
-  follows the same rule. An existing file that already holds the cached bytes
-  is taken over, so payloads materialized before ownership was recorded keep
-  resolving.
+```text
+<payloadDirectory>/
+  <owner>/              one per layer
+    g-<content hash>/   a generated set
+    c-<entry key>/      a set copied from a USDGEO_CACHE_ROOT entry
+    .tmp-<token>/       a set still being written
+```
 
-`usd-pointcloud-convert` does not share this rule. Its output root and payload
-directory must not exist yet, and its transaction marker owns recovery.
+- `<owner>` is a 64-bit hash of the layer's identity: the source and the
+  layer's file-format arguments exactly as it holds them. A local source is
+  named by its path relative to `payloadDirectory`, both canonicalized, so a
+  project that is moved or mounted elsewhere as a whole keeps its payloads;
+  any other source is named by its resolved identifier. Only the hash is
+  written, so no source path, resolver identifier, or validation token
+  appears on disk.
+- Layers never share or replace each other's payloads, and files already in
+  `payloadDirectory` are never touched. Different sources, arguments, or
+  spellings of arguments simply get different owners.
+- A read writes into a private staging directory and publishes it by renaming
+  it into place, so a published generation is never modified. A read that
+  fails or is cancelled removes only its staging directory and leaves the
+  published generation, and every root referencing it, intact.
+- Reading the layer again with the same content finds that generation already
+  published and keeps it, so nothing that has those payloads open sees them
+  replaced. Changed content is published as a new generation, and the root
+  references the new paths. Publishing removes the owner's superseded
+  generations; a process that still shows a superseded generation keeps what
+  it has loaded but cannot load more of it.
+- A staging directory left by an interrupted process is removed by the next
+  read of the same layer once it has gone an hour without being written.
+- A cache hit whose copy is already published under the entry's key reuses it
+  without writing anything, so a published payload directory may be
+  read-only. A damaged copy is replaced by a fresh one.
+
+`usd-pointcloud-convert` does not share this layout. Its output root and
+payload directory must not exist yet, its payloads are written straight into
+that directory, and its transaction marker owns recovery.
 
 ## Rules
 
@@ -221,6 +235,6 @@ should not silently change authored output.
 - Conflicting combinations are rejected rather than resolved by precedence.
 - A default-valued argument and an absent argument produce identical layers.
 - LAS and LAZ accept the same arguments with the same meaning.
-- A tiled layer read a second time regenerates over its own payloads, never
-  replaces a file another layer or a user placed, and restores its ownership
-  record when the read fails.
+- A tiled layer read a second time reuses or supersedes its own published
+  payloads, never touches another layer's or a user's files, and leaves its
+  published payloads intact when the read fails.

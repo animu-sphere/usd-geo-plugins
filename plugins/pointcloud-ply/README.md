@@ -15,8 +15,8 @@ contracts, and requires an explicit CRS because PLY has no embedded CRS model.
 
 The `epsg` file-format argument is required. `linearUnit`, `sourceUpAxis`, and
 `stageUpAxis` are optional. Tiled reads use `tileSize`, `tileMemoryLimit`, and
-`payloadDirectory`; reading the layer again replaces the payloads it generated
-there and refuses any other file. See
+`payloadDirectory`, below which each layer publishes its payloads in a
+directory of its own. See
 [payload ownership](../../docs/architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership).
 
 Faces, mesh authoring, PLY writing, and metadata-only reads are out of scope.

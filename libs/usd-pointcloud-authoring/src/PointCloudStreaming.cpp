@@ -256,7 +256,8 @@ bool AuthorPointCloudTiledAssetFromStream(
     if (spoolDirectory.empty()) return false;
     std::map<std::string, TileSpool> spools;
     std::size_t bufferedBytes = 0;
-    detail::GeneratedPayloadSet payloads(options.directory, options.owner);
+    detail::PayloadGeneration payloads(options.directory, options.owner);
+    std::vector<usdpointcloud::PointTileManifestEntry> manifestEntries;
     const auto cleanup = [&]() {
         for (auto& entry : spools) entry.second.writer.reset();
         std::vector<Diagnostic> cleanupDiagnostics;
@@ -410,16 +411,15 @@ bool AuthorPointCloudTiledAssetFromStream(
         return false;
     }
 
-    // The tile set is known once the stream is spooled, so every payload
-    // path is claimed before the first payload is written.
-    std::vector<std::filesystem::path> payloadPaths;
-    payloadPaths.reserve(spools.size());
+    // The tile set is known once the stream is spooled, so every payload is
+    // declared before the first one is written.
+    std::vector<std::string> payloadNames;
+    payloadNames.reserve(spools.size());
     for (const auto& entry : spools) {
-        payloadPaths.push_back(
-            detail::TilePayloadPath(options.directory, entry.second.id, 0));
+        payloadNames.push_back(detail::TilePayloadName(entry.second.id, 0));
     }
     std::string payloadError;
-    if (!payloads.Claim(payloadPaths, payloadError)) {
+    if (!payloads.Begin(payloadNames, payloadError)) {
         AddError(diagnostics, DiagnosticCode::DecodeFailure, payloadError);
         cleanup();
         return false;
@@ -510,7 +510,8 @@ bool AuthorPointCloudTiledAssetFromStream(
         std::vector<PointCloudTileAsset> singleTile;
         singleTile.push_back(std::move(tile));
         if (!detail::AuthorClaimedTilePayloads(
-                stage, primPath, singleTile, options, payloads)) {
+                stage, primPath, singleTile, options, payloads,
+                manifestEntries)) {
             AddError(diagnostics, DiagnosticCode::DecodeFailure,
                      "unable to author tiled point-cloud payloads");
             return failTile();
@@ -529,10 +530,16 @@ bool AuthorPointCloudTiledAssetFromStream(
         cleanup();
         return false;
     }
-    if (!payloads.Commit(payloadError)) {
+    if (!detail::CommitTilePayloads(stage->GetRootLayer(), payloads,
+                                    manifestEntries, payloadError)) {
         AddError(diagnostics, DiagnosticCode::DecodeFailure, payloadError);
         cleanup();
         return false;
+    }
+    if (options.tileManifestEntries) {
+        options.tileManifestEntries->insert(
+            options.tileManifestEntries->end(), manifestEntries.begin(),
+            manifestEntries.end());
     }
     layer->TransferContent(stage->GetRootLayer());
     return true;

@@ -589,8 +589,8 @@ bool UsdGeoCopcFileFormat::Read(SdfLayer* layer,
         usdgeo::PointCloudPayloadOptions payloadOptions{
             payloadDirectory.string(), resolvedPath,
             request.tileMemoryLimitBytes};
-        payloadOptions.owner =
-            usdgeo::PointCloudPayloadOwner(resolvedPath, request);
+        payloadOptions.owner = usdgeo::PointCloudPayloadOwner(
+            resolvedPath, payloadDirectory, layer->GetFileFormatArguments());
         if (!usdgeo::AuthorPointCloudTiledAssetWithPayloads(
                 layer, "/PointCloud", tiles, payloadOptions, diagnostics)) {
             TF_RUNTIME_ERROR("%s", usdgeocopc::diagnostics::Message(

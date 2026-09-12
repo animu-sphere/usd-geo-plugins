@@ -58,22 +58,32 @@ std::filesystem::path UniqueTestDirectory(const std::string& name) {
     return directory;
 }
 
-std::filesystem::path OwnerRecordPath(const std::filesystem::path& directory,
-                                      const std::string& owner) {
-    return directory / ("payload-owner-" +
-                        usdgeo::StableCacheKey({{"payloadOwner", owner}}) +
-                        ".manifest");
+std::filesystem::path OwnerDirectory(const std::filesystem::path& directory,
+                                     const std::string& owner) {
+    return directory / usdgeo::StableCacheKey({{"payloadOwner", owner}});
 }
 
-std::string OwnerRecord(const std::vector<std::string>& payloads) {
-    std::string record = "format=usd-pointcloud-payload-owner-v1\n"
-                         "payload.count=" +
-                         std::to_string(payloads.size()) + "\n";
-    for (std::size_t index = 0; index < payloads.size(); ++index) {
-        record += "payload." + std::to_string(index) + "=" +
-                  payloads[index] + "\n";
+std::vector<std::filesystem::path> Subdirectories(
+    const std::filesystem::path& directory, const std::string& prefix) {
+    std::vector<std::filesystem::path> matches;
+    std::error_code error;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directory, error)) {
+        if (entry.is_directory() &&
+            entry.path().filename().string().rfind(prefix, 0) == 0) {
+            matches.push_back(entry.path());
+        }
     }
-    return record;
+    std::sort(matches.begin(), matches.end());
+    return matches;
+}
+
+// The one published generation an owner has, which a test expects to exist.
+std::filesystem::path OnlyGeneration(const std::filesystem::path& ownerDirectory) {
+    const auto generated = Subdirectories(ownerDirectory, "g-");
+    const auto cached = Subdirectories(ownerDirectory, "c-");
+    Check(generated.size() + cached.size() == 1);
+    return generated.empty() ? cached.front() : generated.front();
 }
 
 class WarningCounter final : public pxr::TfDiagnosticMgr::Delegate {
@@ -1258,11 +1268,9 @@ bool AuthorOwnedStream(pxr::SdfLayer* layer,
         diagnostics);
 }
 
-void TestOwnedPayloadsAreRegeneratedByTheirOwner() {
+void TestOwnedPayloadsLiveInTheirOwnersGeneration() {
     const auto directory = UniqueTestDirectory("usd_geo_owned_payloads");
-    const auto first = directory / "Tile_L0_p0_p0_p0_LOD0.usdc";
-    const auto second = directory / "Tile_L0_p1_p0_p0_LOD0.usdc";
-    const auto record = OwnerRecordPath(directory, "layer-a");
+    const auto ownerDirectory = OwnerDirectory(directory, "layer-a");
     std::vector<usdgeo::Diagnostic> diagnostics;
 
     const auto layer = pxr::SdfLayer::CreateAnonymous("owned.usda");
@@ -1270,23 +1278,45 @@ void TestOwnedPayloadsAreRegeneratedByTheirOwner() {
                             {{0.25, 0.0, 0.0}, {1.25, 0.0, 0.0}},
                             diagnostics));
     Check(diagnostics.empty());
-    Check(std::filesystem::exists(first) && std::filesystem::exists(second));
-    Check(ReadFile(record) ==
-          OwnerRecord({"Tile_L0_p0_p0_p0_LOD0.usdc",
-                       "Tile_L0_p1_p0_p0_LOD0.usdc"}));
+    const auto generation = OnlyGeneration(ownerDirectory);
+    const auto first = generation / "Tile_L0_p0_p0_p0_LOD0.usdc";
+    Check(std::filesystem::exists(first) &&
+          std::filesystem::exists(generation / "Tile_L0_p1_p0_p0_LOD0.usdc"));
+    Check(Subdirectories(ownerDirectory, ".tmp-").empty());
+    const auto lod = layer->GetPrimAtPath(
+        pxr::SdfPath("/PointCloud/Tiles/Tile_L0_p0_p0_p0/LOD0"));
+    Check(lod != nullptr);
+    const auto arcs = lod->GetPayloadList().GetPrependedItems();
+    Check(arcs.size() == 1 &&
+          arcs.front().GetAssetPath() ==
+              ownerDirectory.filename().generic_string() + "/" +
+                  generation.filename().generic_string() +
+                  "/Tile_L0_p0_p0_p0_LOD0.usdc");
 
-    // Reopening the same layer regenerates in place: the payload it still
-    // produces is replaced, and the one it no longer produces is removed.
-    const auto reopened = pxr::SdfLayer::CreateAnonymous("reopened.usda");
-    Check(AuthorOwnedStream(reopened.operator->(), directory, "layer-a",
+    // Reading the layer again with identical content keeps the published
+    // generation as it is instead of replacing files that may be open.
+    const auto firstWrite = std::filesystem::last_write_time(first);
+    const auto again = pxr::SdfLayer::CreateAnonymous("again.usda");
+    Check(AuthorOwnedStream(again.operator->(), directory, "layer-a",
+                            {{0.25, 0.0, 0.0}, {1.25, 0.0, 0.0}},
+                            diagnostics));
+    Check(OnlyGeneration(ownerDirectory) == generation);
+    Check(std::filesystem::last_write_time(first) == firstWrite);
+
+    // Changed content is published as a new generation, and the superseded
+    // one is removed.
+    const auto changed = pxr::SdfLayer::CreateAnonymous("changed.usda");
+    Check(AuthorOwnedStream(changed.operator->(), directory, "layer-a",
                             {{0.25, 0.0, 0.0}, {0.75, 0.0, 0.0}},
                             diagnostics));
-    Check(diagnostics.empty());
-    Check(std::filesystem::exists(first) && !std::filesystem::exists(second));
-    Check(ReadFile(record) == OwnerRecord({"Tile_L0_p0_p0_p0_LOD0.usdc"}));
+    const auto changedGeneration = OnlyGeneration(ownerDirectory);
+    Check(changedGeneration != generation);
+    Check(!std::filesystem::exists(generation));
+    Check(!std::filesystem::exists(
+        changedGeneration / "Tile_L0_p1_p0_p0_LOD0.usdc"));
     {
         const auto rootLayerPath = directory / "PointCloud.usda";
-        Check(reopened->Export(rootLayerPath.string()));
+        Check(changed->Export(rootLayerPath.string()));
         const auto stage = pxr::UsdStage::Open(rootLayerPath.string());
         Check(stage);
         const auto points = pxr::UsdGeomPoints::Get(
@@ -1298,117 +1328,119 @@ void TestOwnedPayloadsAreRegeneratedByTheirOwner() {
         std::filesystem::remove(rootLayerPath);
     }
 
-    // A different layer never replaces them, and neither does a generation
-    // without an owner.
-    const auto authoredPayload = ReadFile(first);
+    // Other layers and user files in the same payload directory never meet
+    // this owner's payloads: each owner has its own directory.
+    const auto published =
+        ReadFile(changedGeneration / "Tile_L0_p0_p0_p0_LOD0.usdc");
+    WriteFile(directory / "Tile_L0_p0_p0_p0_LOD0.usdc", "user file");
     const auto other = pxr::SdfLayer::CreateAnonymous("other.usda");
-    Check(!AuthorOwnedStream(other.operator->(), directory, "layer-b",
-                             {{0.25, 0.0, 0.0}}, diagnostics));
-    Check(!diagnostics.empty() &&
-          diagnostics.front().message.find("did not generate") !=
-              std::string::npos);
-    Check(other->GetPrimAtPath(pxr::SdfPath("/PointCloud")) == nullptr);
-    Check(!std::filesystem::exists(OwnerRecordPath(directory, "layer-b")));
+    Check(AuthorOwnedStream(other.operator->(), directory, "layer-b",
+                            {{0.25, 0.0, 0.0}}, diagnostics));
+    Check(OnlyGeneration(OwnerDirectory(directory, "layer-b")) !=
+          changedGeneration);
+    Check(ReadFile(changedGeneration / "Tile_L0_p0_p0_p0_LOD0.usdc") ==
+          published);
+    Check(ReadFile(directory / "Tile_L0_p0_p0_p0_LOD0.usdc") == "user file");
+
+    // Without an owner the directory stays exclusive.
     Check(!AuthorOwnedStream(other.operator->(), directory, "",
                              {{0.25, 0.0, 0.0}}, diagnostics));
-    Check(ReadFile(first) == authoredPayload);
-    Check(ReadFile(record) == OwnerRecord({"Tile_L0_p0_p0_p0_LOD0.usdc"}));
-
-    // A file the owner never generated is not claimed on the owner's behalf.
-    WriteFile(second, "user file");
-    Check(!AuthorOwnedStream(reopened.operator->(), directory, "layer-a",
-                             {{0.25, 0.0, 0.0}, {1.25, 0.0, 0.0}},
-                             diagnostics));
-    Check(ReadFile(second) == "user file");
-    Check(ReadFile(first) == authoredPayload);
-    Check(ReadFile(record) == OwnerRecord({"Tile_L0_p0_p0_p0_LOD0.usdc"}));
+    Check(ReadFile(directory / "Tile_L0_p0_p0_p0_LOD0.usdc") == "user file");
     std::filesystem::remove_all(directory);
 }
 
-void TestInterruptedOwnedGenerationIsReplaceable() {
+void TestInterruptedOwnedGenerationIsRecovered() {
     const auto directory =
         UniqueTestDirectory("usd_geo_interrupted_owned_payloads");
-    const auto payload = directory / "Tile_L0_p0_p0_p0_LOD0.usdc";
-    const auto record = OwnerRecordPath(directory, "layer-a");
-    std::filesystem::create_directories(directory);
-    // What an interrupted generation leaves behind: its claim, recorded
-    // before the first write, and a payload no root ever referenced.
-    WriteFile(payload, "partial payload");
-    WriteFile(record, OwnerRecord({"Tile_L0_p0_p0_p0_LOD0.usdc",
-                                   "Tile_L0_p3_p0_p0_LOD0.usdc"}));
+    const auto ownerDirectory = OwnerDirectory(directory, "layer-a");
+    // What interrupted generations leave behind: staging directories that
+    // were never published. A live generation keeps its own fresh.
+    const auto stale = ownerDirectory / ".tmp-stale";
+    const auto live = ownerDirectory / ".tmp-live";
+    std::filesystem::create_directories(stale);
+    std::filesystem::create_directories(live);
+    WriteFile(stale / "Tile_L0_p0_p0_p0_LOD0.usdc", "partial payload");
+    std::filesystem::last_write_time(
+        stale, std::filesystem::file_time_type::clock::now() -
+                   std::chrono::hours(2));
 
     std::vector<usdgeo::Diagnostic> diagnostics;
     const auto layer = pxr::SdfLayer::CreateAnonymous("recovered.usda");
     Check(AuthorOwnedStream(layer.operator->(), directory, "layer-a",
                             {{0.25, 0.0, 0.0}}, diagnostics));
     Check(diagnostics.empty());
-    Check(ReadFile(payload) != "partial payload");
-    Check(ReadFile(record) == OwnerRecord({"Tile_L0_p0_p0_p0_LOD0.usdc"}));
+    Check(!std::filesystem::exists(stale));
+    Check(std::filesystem::exists(live));
 
-    // A record naming a path outside the directory is refused as a whole
-    // rather than trusted with a removal.
-    WriteFile(record, OwnerRecord({"../Tile_L0_p0_p0_p0_LOD0.usdc"}));
-    const auto authoredPayload = ReadFile(payload);
-    Check(!AuthorOwnedStream(layer.operator->(), directory, "layer-a",
-                             {{0.25, 0.0, 0.0}}, diagnostics));
-    Check(!diagnostics.empty() &&
-          diagnostics.front().message.find("is invalid") != std::string::npos);
-    Check(ReadFile(payload) == authoredPayload);
+    // A published generation that lost a file is replaced when the same
+    // content is published again, rather than trusted.
+    const auto generation = OnlyGeneration(ownerDirectory);
+    const auto payload = generation / "Tile_L0_p0_p0_p0_LOD0.usdc";
+    std::filesystem::remove(payload);
+    Check(AuthorOwnedStream(layer.operator->(), directory, "layer-a",
+                            {{0.25, 0.0, 0.0}}, diagnostics));
+    Check(OnlyGeneration(ownerDirectory) == generation);
+    Check(std::filesystem::exists(payload));
     std::filesystem::remove_all(directory);
 }
 
-void TestFailedOwnedGenerationRestoresOwnership() {
+void TestFailedOwnedGenerationKeepsPublishedPayloads() {
     const auto directory =
         UniqueTestDirectory("usd_geo_failed_owned_payloads");
-    const auto first = directory / "Tile_L0_p0_p0_p0_LOD0.usdc";
-    const auto second = directory / "Tile_L0_p1_p0_p0_LOD0.usdc";
-    const auto record = OwnerRecordPath(directory, "layer-a");
+    const auto ownerDirectory = OwnerDirectory(directory, "layer-a");
     std::vector<usdgeo::Diagnostic> diagnostics;
 
     const auto layer = pxr::SdfLayer::CreateAnonymous("failed_owned.usda");
     Check(AuthorOwnedStream(layer.operator->(), directory, "layer-a",
                             {{0.25, 0.0, 0.0}, {1.25, 0.0, 0.0}},
                             diagnostics));
-    const auto ownership = ReadFile(record);
-    const auto untouched = ReadFile(second);
-    const auto previous = ReadFile(first);
+    const auto generation = OnlyGeneration(ownerDirectory);
+    const auto published = ReadDirectoryFiles(generation);
 
-    // Cancel as soon as the regeneration has replaced its first payload.
-    const auto replacedFirst = [&first, &previous]() {
-        std::ifstream input(first, std::ios::binary);
-        const std::string bytes{std::istreambuf_iterator<char>(input),
-                                std::istreambuf_iterator<char>()};
-        return bytes != previous;
+    // Cancel as soon as the regeneration has staged its first payload.
+    const auto stagedFirst = [&ownerDirectory]() {
+        for (const auto& staging : Subdirectories(ownerDirectory, ".tmp-")) {
+            if (std::filesystem::exists(staging /
+                                        "Tile_L0_p0_p0_p0_LOD0.usdc")) {
+                return true;
+            }
+        }
+        return false;
     };
     const auto regenerated = pxr::SdfLayer::CreateAnonymous("cancelled.usda");
     Check(!AuthorOwnedStream(regenerated.operator->(), directory, "layer-a",
                              {{0.5, 0.0, 0.0}, {1.25, 0.0, 0.0}},
-                             diagnostics, replacedFirst));
+                             diagnostics, stagedFirst));
     Check(!diagnostics.empty());
     Check(regenerated->GetPrimAtPath(pxr::SdfPath("/PointCloud")) == nullptr);
-    Check(!std::filesystem::exists(first));
-    Check(ReadFile(second) == untouched);
-    Check(ReadFile(record) == ownership);
-    Check(AuthorOwnedStream(regenerated.operator->(), directory, "layer-a",
-                            {{0.25, 0.0, 0.0}, {1.25, 0.0, 0.0}},
-                            diagnostics));
+    Check(OnlyGeneration(ownerDirectory) == generation);
+    Check(ReadDirectoryFiles(generation) == published);
+    Check(Subdirectories(ownerDirectory, ".tmp-").empty());
     std::filesystem::remove_all(directory);
 
-    // A cancelled first generation removes the directory it created,
-    // ownership record included.
+    // A cancelled first generation removes every directory it created.
     const auto created = UniqueTestDirectory("usd_geo_cancelled_owned_payloads");
-    const auto createdPayload = created / "Tile_L0_p0_p0_p0_LOD0.usdc";
+    const auto createdOwner = OwnerDirectory(created, "layer-a");
     const auto fresh = pxr::SdfLayer::CreateAnonymous("fresh.usda");
     Check(!AuthorOwnedStream(
         fresh.operator->(), created, "layer-a",
         {{0.25, 0.0, 0.0}, {1.25, 0.0, 0.0}}, diagnostics,
-        [&createdPayload]() { return std::filesystem::exists(createdPayload); }));
+        [&createdOwner]() {
+            std::error_code error;
+            for (const auto& staging :
+                 std::filesystem::directory_iterator(createdOwner, error)) {
+                if (std::filesystem::exists(staging.path() /
+                                            "Tile_L0_p0_p0_p0_LOD0.usdc")) {
+                    return true;
+                }
+            }
+            return false;
+        }));
     Check(!std::filesystem::exists(created));
 }
 
 void TestDetachedAuthoringDoesNotResolvePayloads() {
     const auto directory = UniqueTestDirectory("usd_geo_detached_payloads");
-    const auto payload = directory / "Tile_L0_p0_p0_p0_LOD0.usdc";
     usdgeo::GeoReference reference;
     reference.epsgCode = 26910;
 
@@ -1441,23 +1473,27 @@ void TestDetachedAuthoringDoesNotResolvePayloads() {
     Check(diagnostics.empty());
     Check(layer->GetPrimAtPath(pxr::SdfPath(
               "/PointCloud/Tiles/Tile_L0_p0_p0_p0/LOD0")) != nullptr);
+    const auto payload =
+        OnlyGeneration(OwnerDirectory(directory, "detached-layer")) /
+        "Tile_L0_p0_p0_p0_LOD0.usdc";
     Check(std::filesystem::exists(payload));
     Check(!pxr::SdfLayer::Find(payload.string()));
 
-    // The same layer regenerates over its own payload.
+    // The same layer is authored again over its own payloads.
     Check(usdgeo::AuthorPointCloudTiledAssetWithPayloads(
         layer.operator->(), "/PointCloud", {tile}, options, diagnostics));
+    std::filesystem::remove_all(directory);
 
     // A failure reports why and leaves the layer as it was.
+    WriteFile(directory, "not a directory");
     const auto untouched = pxr::SdfLayer::CreateAnonymous("untouched.usda");
-    options.owner = "another-layer";
     Check(!usdgeo::AuthorPointCloudTiledAssetWithPayloads(
         untouched.operator->(), "/PointCloud", {tile}, options, diagnostics));
     Check(!diagnostics.empty() &&
-          diagnostics.front().message.find("did not generate") !=
+          diagnostics.front().message.find("not a usable directory") !=
               std::string::npos);
     Check(untouched->GetPrimAtPath(pxr::SdfPath("/PointCloud")) == nullptr);
-    std::filesystem::remove_all(directory);
+    std::filesystem::remove(directory);
 
     const auto streamDirectory =
         UniqueTestDirectory("usd_geo_detached_stream_payloads");
@@ -1471,7 +1507,9 @@ void TestDetachedAuthoringDoesNotResolvePayloads() {
         Check(warnings.Count() == 0);
     }
     Check(!pxr::SdfLayer::Find(
-        (streamDirectory / "Tile_L0_p0_p0_p0_LOD0.usdc").string()));
+        (OnlyGeneration(OwnerDirectory(streamDirectory, "detached-stream")) /
+         "Tile_L0_p0_p0_p0_LOD0.usdc")
+            .string()));
     std::filesystem::remove_all(streamDirectory);
 }
 
@@ -1521,9 +1559,9 @@ int main() {
     TestStreamCancellationDuringSpoolReadCleansSpools();
     TestStreamFailureDoesNotMutateLayer();
     TestStreamPayloadFailureRollsBackGeneratedPayloads();
-    TestOwnedPayloadsAreRegeneratedByTheirOwner();
-    TestInterruptedOwnedGenerationIsReplaceable();
-    TestFailedOwnedGenerationRestoresOwnership();
+    TestOwnedPayloadsLiveInTheirOwnersGeneration();
+    TestInterruptedOwnedGenerationIsRecovered();
+    TestFailedOwnedGenerationKeepsPublishedPayloads();
     TestDetachedAuthoringDoesNotResolvePayloads();
     return 0;
 }

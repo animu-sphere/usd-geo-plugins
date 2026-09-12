@@ -149,14 +149,17 @@ Each payload file is built in an in-memory layer and written with
 `SdfLayer::Export`, so writing it never registers a layer under the payload
 path.
 
-`PointCloudPayloadOptions::owner` decides who owns the files written into the
-payload directory. Left empty, the directory is exclusive and any existing
-payload path refuses the write, which is what `usd-pointcloud-convert` relies
-on. Set, typically to `PointCloudPayloadOwner(resolvedPath, request)`, the
-generation replaces the payloads that owner generated before, removes those it
-no longer generates, and refuses every other existing file. Ownership is
-recorded in the directory before the first payload is written and restored if
-the generation fails. The rule is stated in the
+`PointCloudPayloadOptions::owner` decides where payload files go. Left empty,
+the payload directory is exclusive: payloads are written straight into it and
+any existing payload path refuses the write, which is what
+`usd-pointcloud-convert` relies on. Set, typically to
+`PointCloudPayloadOwner(resolvedPath, payloadDirectory, arguments)`, payloads
+go to `<directory>/<owner key>/<generation>/`. A generation is staged in a
+private directory and published by renaming it into place, so a published one
+is never modified: a failure removes only the staging directory, identical
+content reuses the published generation, and changed content is published
+beside it before the superseded one is removed. Nothing outside the owner's
+directory is touched. The layout is stated in the
 [file-format argument contract](../../docs/architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership).
 
 ## Coordinate-space assumptions
@@ -199,10 +202,12 @@ ctest --test-dir build/cy2026-windows-x86_64-py313-usd -C Release `
 - Sampling is fixed-stride, inherited from `usdPointCloudCore`.
 - Payload working-set behavior is unmeasured: the library emits payloads, but
   no claim is made that a non-selected LOD child's payload stays unloaded.
-- Payloads are replaced by writing a new file and renaming it over the old
-  one. A platform that refuses to rename over an open file, such as Windows,
-  fails a regeneration while another stage in the process still holds that
-  payload open.
+- A superseded generation is removed on a best-effort basis. On a platform
+  that refuses to delete an open file, such as Windows, files another stage
+  still holds stay until a later read of the same layer removes them.
+- Generating payloads needs write access to the payload directory even when
+  the content turns out unchanged; only a cache hit whose copy is already
+  published reads a directory without writing to it.
 - `AuthorPointCloudTiledAssetFromStream` consumes a pull stream, spools points
   by source tile, and reconstructs one tile at a time before payload authoring.
   The router overload also accepts a planned `PointBudgetTileRouter`, allowing

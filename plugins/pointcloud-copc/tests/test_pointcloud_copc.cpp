@@ -735,9 +735,13 @@ void TestTiledReadReopens() {
     }
     Check(!pxr::SdfLayer::Find(source.string(), arguments),
           "tiled COPC layer was released");
-    Check(std::filesystem::exists(directory / "payloads" /
-                                  "Tile_L0_p0_p0_p0_LOD0.usdc"),
-          "tiled COPC payload exists");
+    bool hasPayload = false;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             directory / "payloads")) {
+        hasPayload = hasPayload ||
+                     entry.path().filename() == "Tile_L0_p0_p0_p0_LOD0.usdc";
+    }
+    Check(hasPayload, "tiled COPC payload exists");
     std::error_code error;
     std::filesystem::remove_all(directory, error);
 }

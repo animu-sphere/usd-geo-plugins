@@ -114,12 +114,12 @@ std::string TilePrimName(const usdpointcloud::PointTileId& id) {
            "_" + axisName(id.y) + "_" + axisName(id.z);
 }
 
-// Where a payload-backed LOD root writes its payload files. Every path it
-// writes has already been claimed by `payloads`.
+// Which tile a payload-backed LOD root belongs to, and the generation that
+// decides where its payload files are written.
 struct PayloadTarget {
-    const std::filesystem::path& directory;
+    const usdpointcloud::PointTileId& tileId;
     const std::filesystem::path& rootLayerPath;
-    detail::GeneratedPayloadSet& payloads;
+    const detail::PayloadGeneration& payloads;
 };
 
 bool AuthorLodRoot(
@@ -159,9 +159,11 @@ bool AuthorLodRoot(
             continue;
         }
 
-        const auto payloadPath = payloadTarget->directory /
-            (primPath.substr(primPath.find_last_of('/') + 1) + "_" +
-             lodName + ".usdc");
+        const auto payloadPath = payloadTarget->payloads.PathFor(
+            detail::TilePayloadName(payloadTarget->tileId, index));
+        if (payloadPath.empty()) {
+            return false;
+        }
         std::error_code relativeError;
         const auto payloadIdentifier = std::filesystem::relative(
             payloadPath, payloadTarget->rootLayerPath.parent_path(),
@@ -171,19 +173,15 @@ bool AuthorLodRoot(
             return false;
         }
         // The payload is built in memory and exported, so writing it never
-        // registers a layer under the payload path. A regeneration can then
-        // replace a payload this process still has open.
+        // registers a layer under the payload path.
         const auto payloadStage =
             pxr::UsdStage::CreateInMemory("payload.usdc");
         if (!payloadStage || !pxr::UsdGeomXform::Define(
                                   payloadStage, pxr::SdfPath("/" + lodName)) ||
             !AuthorPointCloudAsset(payloadStage, "/" + lodName + "/Points",
                                    level.reference, level.bounds, level.chunk,
-                                   level.data)) {
-            return false;
-        }
-        payloadTarget->payloads.MarkWritten(payloadPath);
-        if (!payloadStage->GetRootLayer()->Export(payloadPath.string())) {
+                                   level.data) ||
+            !payloadStage->GetRootLayer()->Export(payloadPath.string())) {
             return false;
         }
         const auto lodPrim = pxr::UsdGeomXform::Define(
@@ -245,31 +243,127 @@ pxr::UsdStageRefPtr CreateDetachedStage() {
     return pxr::UsdStage::CreateInMemory(pxr::UsdStage::LoadNone);
 }
 
-std::filesystem::path TilePayloadPath(const std::filesystem::path& directory,
-                                      const usdpointcloud::PointTileId& id,
-                                      std::size_t lodIndex) {
-    return directory /
-           (TilePrimName(id) + "_LOD" + std::to_string(lodIndex) + ".usdc");
+std::string TilePayloadName(const usdpointcloud::PointTileId& id,
+                            std::size_t lodIndex) {
+    return TilePrimName(id) + "_LOD" + std::to_string(lodIndex) + ".usdc";
 }
 
-std::vector<std::filesystem::path> TilePayloadPaths(
-    const std::filesystem::path& directory,
+std::vector<std::string> TilePayloadNames(
     const std::vector<PointCloudTileAsset>& tiles) {
-    std::vector<std::filesystem::path> paths;
+    std::vector<std::string> names;
     for (const auto& tile : tiles) {
         for (std::size_t index = 0; index < tile.levels.size(); ++index) {
-            paths.push_back(TilePayloadPath(directory, tile.tile.id, index));
+            names.push_back(TilePayloadName(tile.tile.id, index));
         }
     }
-    return paths;
+    return names;
+}
+
+namespace {
+
+std::string ReplacePathComponent(const std::string& path,
+                                 const std::string& from,
+                                 const std::string& to) {
+    std::string result;
+    std::size_t start = 0;
+    for (;;) {
+        const auto separator = path.find('/', start);
+        const auto component = path.substr(
+            start, separator == std::string::npos ? std::string::npos
+                                                  : separator - start);
+        result += component == from ? to : component;
+        if (separator == std::string::npos) {
+            return result;
+        }
+        result += '/';
+        start = separator + 1;
+    }
+}
+
+} // namespace
+
+void RepointPayloads(const pxr::SdfLayerHandle& layer,
+                     const std::string& fromComponent,
+                     const std::string& toComponent) {
+    layer->Traverse(pxr::SdfPath::AbsoluteRootPath(),
+                    [&](const pxr::SdfPath& path) {
+        const auto prim = layer->GetPrimAtPath(path);
+        if (!prim || !prim->HasPayloads()) {
+            return;
+        }
+        const auto payloads = prim->GetPayloadList();
+        const auto repoint = [&](auto items) {
+            for (const auto& item : items) {
+                const pxr::SdfPayload payload = item;
+                const auto assetPath = ReplacePathComponent(
+                    payload.GetAssetPath(), fromComponent, toComponent);
+                if (assetPath != payload.GetAssetPath()) {
+                    auto repointed = payload;
+                    repointed.SetAssetPath(assetPath);
+                    items.Replace(payload, repointed);
+                }
+            }
+        };
+        repoint(payloads.GetExplicitItems());
+        repoint(payloads.GetAddedItems());
+        repoint(payloads.GetPrependedItems());
+        repoint(payloads.GetAppendedItems());
+    });
+}
+
+bool CommitTilePayloads(
+    const pxr::SdfLayerHandle& layer,
+    PayloadGeneration& payloads,
+    std::vector<usdpointcloud::PointTileManifestEntry>& manifestEntries,
+    std::string& error) {
+    if (!payloads.Commit(error)) {
+        return false;
+    }
+    if (payloads.StagingName().empty()) {
+        return true;
+    }
+    RepointPayloads(layer, payloads.StagingName(), payloads.PublishedName());
+    for (auto& entry : manifestEntries) {
+        entry.payloadPath = ReplacePathComponent(
+            entry.payloadPath, payloads.StagingName(), payloads.PublishedName());
+    }
+    return true;
 }
 
 } // namespace detail
 
 std::string PointCloudPayloadOwner(
-    const std::string& resolvedPath,
-    const usdpointcloud::PointReadRequest& request) {
-    return resolvedPath + "?" + request.normalizedArguments;
+    const std::string& source,
+    const std::filesystem::path& payloadDirectory,
+    const pxr::SdfLayer::FileFormatArguments& arguments) {
+    // A local source is named relative to the payload directory, both
+    // canonicalized, so a project that moves or is mounted elsewhere as a
+    // whole keeps its owner. Any other source keeps its resolved identifier;
+    // the owner is only ever hashed, never written.
+    std::string owner;
+    std::error_code error;
+    if (std::filesystem::is_regular_file(source, error) && !error) {
+        const auto canonicalSource =
+            std::filesystem::weakly_canonical(source, error);
+        std::error_code directoryError;
+        const auto canonicalDirectory =
+            std::filesystem::weakly_canonical(payloadDirectory, directoryError);
+        if (!error && !directoryError) {
+            owner = "local:" + canonicalSource
+                                   .lexically_relative(canonicalDirectory)
+                                   .generic_string();
+        }
+    }
+    if (owner.empty()) {
+        owner = "resolved:" + source;
+    }
+    // The arguments exactly as the layer holds them, which is its identity:
+    // two layers never share an owner because normalization rounded them
+    // together.
+    for (const auto& [key, value] : arguments) {
+        owner += "\n" + key + "=" + value;
+    }
+    return owner;
 }
 
 pxr::UsdStageRefPtr PointCloudLayer::CreateStage() {
@@ -844,19 +938,20 @@ bool AuthorPointCloudTiledAssetWithPayloads(
 
 namespace detail {
 
-bool AuthorClaimedTilePayloads(const pxr::UsdStageRefPtr& stage,
-                               const std::string& primPath,
-                               const std::vector<PointCloudTileAsset>& tiles,
-                               const PointCloudPayloadOptions& options,
-                               GeneratedPayloadSet& payloads) {
+bool AuthorClaimedTilePayloads(
+    const pxr::UsdStageRefPtr& stage,
+    const std::string& primPath,
+    const std::vector<PointCloudTileAsset>& tiles,
+    const PointCloudPayloadOptions& options,
+    PayloadGeneration& payloads,
+    std::vector<usdpointcloud::PointTileManifestEntry>& manifestEntries) {
     if (!stage || !IsValidPrimPath(primPath) || tiles.empty() ||
         options.directory.empty() || options.rootLayerPath.empty()) {
         return false;
     }
 
-    const std::filesystem::path payloadDirectory(options.directory);
     const std::filesystem::path rootLayerPath(options.rootLayerPath);
-    std::vector<usdpointcloud::PointTileManifestEntry> manifestEntries;
+    std::vector<usdpointcloud::PointTileManifestEntry> tileEntries;
     std::set<std::string> tileNames;
     for (const auto& tile : tiles) {
         std::vector<usdgeo::Diagnostic> diagnostics;
@@ -872,14 +967,18 @@ bool AuthorClaimedTilePayloads(const pxr::UsdStageRefPtr& stage,
                 !SameBounds(level.bounds, item.bounds)) {
                 return false;
             }
+            const auto payloadPath =
+                payloads.PathFor(TilePayloadName(tile.tile.id, index));
+            if (payloadPath.empty()) {
+                return false;
+            }
             std::error_code error;
             const auto relativePayloadPath = std::filesystem::relative(
-                TilePayloadPath(payloadDirectory, tile.tile.id, index),
-                rootLayerPath.parent_path(), error);
+                payloadPath, rootLayerPath.parent_path(), error);
             if (error || relativePayloadPath.empty()) {
                 return false;
             }
-            manifestEntries.push_back({
+            tileEntries.push_back({
                 tile.tile.id,
                 static_cast<std::uint32_t>(index),
                 item.bounds,
@@ -889,7 +988,7 @@ bool AuthorClaimedTilePayloads(const pxr::UsdStageRefPtr& stage,
     }
     if (options.tileManifestEntries) {
         std::vector<usdgeo::Diagnostic> manifestDiagnostics;
-        const usdpointcloud::PointTileManifest tileManifest{manifestEntries};
+        const usdpointcloud::PointTileManifest tileManifest{tileEntries};
         if (!usdpointcloud::ValidatePointTileManifest(
                 tileManifest, manifestDiagnostics)) {
             return false;
@@ -904,11 +1003,11 @@ bool AuthorClaimedTilePayloads(const pxr::UsdStageRefPtr& stage,
         return false;
     }
 
-    const PayloadTarget payloadTarget{payloadDirectory, rootLayerPath,
-                                      payloads};
     const auto heuristicPath =
         pxr::SdfPath(primPath + "/LodHeuristics");
     for (const auto& tile : tiles) {
+        const PayloadTarget payloadTarget{tile.tile.id, rootLayerPath,
+                                          payloads};
         const auto tilePath = pxr::SdfPath(
             primPath + "/Tiles/" + TilePrimName(tile.tile.id));
         const auto tileHeuristicPath =
@@ -925,11 +1024,8 @@ bool AuthorClaimedTilePayloads(const pxr::UsdStageRefPtr& stage,
             return false;
         }
     }
-    if (options.tileManifestEntries) {
-        options.tileManifestEntries->insert(
-            options.tileManifestEntries->end(), manifestEntries.begin(),
-            manifestEntries.end());
-    }
+    manifestEntries.insert(manifestEntries.end(), tileEntries.begin(),
+                           tileEntries.end());
     return true;
 }
 
@@ -949,24 +1045,29 @@ bool AuthorGeneratedTilePayloads(
         error = "invalid tiled point-cloud payload request";
         return false;
     }
-    const std::filesystem::path payloadDirectory(options.directory);
-    const auto payloadPaths = detail::TilePayloadPaths(payloadDirectory, tiles);
-    detail::GeneratedPayloadSet payloads(payloadDirectory, options.owner);
-    if (!payloads.Claim(payloadPaths, error)) {
+    const auto names = detail::TilePayloadNames(tiles);
+    detail::PayloadGeneration payloads(options.directory, options.owner);
+    std::vector<usdpointcloud::PointTileManifestEntry> manifestEntries;
+    if (!payloads.Begin(names, error)) {
         return false;
     }
     if (!detail::AuthorClaimedTilePayloads(stage, primPath, tiles, options,
-                                           payloads)) {
+                                           payloads, manifestEntries)) {
         error = "unable to author tiled point-cloud payloads";
-        payloads.Rollback();
         return false;
     }
-    if (!payloads.Commit(error)) {
-        payloads.Rollback();
+    if (!detail::CommitTilePayloads(stage->GetRootLayer(), payloads,
+                                    manifestEntries, error)) {
         return false;
     }
-    generatedPayloads.insert(generatedPayloads.end(), payloadPaths.begin(),
-                             payloadPaths.end());
+    for (const auto& name : names) {
+        generatedPayloads.push_back(payloads.PublishedPathFor(name));
+    }
+    if (options.tileManifestEntries) {
+        options.tileManifestEntries->insert(
+            options.tileManifestEntries->end(), manifestEntries.begin(),
+            manifestEntries.end());
+    }
     return true;
 }
 

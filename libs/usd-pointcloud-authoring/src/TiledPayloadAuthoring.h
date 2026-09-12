@@ -1,11 +1,10 @@
 #pragma once
 
-#include "GeneratedPayloadSet.h"
+#include "PayloadGeneration.h"
 
 #include "usdgeo/PointCloudLayer.h"
 
 #include <cstddef>
-#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -17,20 +16,36 @@ namespace usdgeo::detail {
 // identity to anchor one.
 pxr::UsdStageRefPtr CreateDetachedStage();
 
-std::filesystem::path TilePayloadPath(const std::filesystem::path& directory,
-                                      const usdpointcloud::PointTileId& id,
-                                      std::size_t lodIndex);
+std::string TilePayloadName(const usdpointcloud::PointTileId& id,
+                            std::size_t lodIndex);
 
-std::vector<std::filesystem::path> TilePayloadPaths(
-    const std::filesystem::path& directory,
+std::vector<std::string> TilePayloadNames(
     const std::vector<PointCloudTileAsset>& tiles);
 
-// Authors payload-backed tiles whose payload paths `payloads` has already
-// claimed, writing each payload file and marking it written.
-bool AuthorClaimedTilePayloads(const pxr::UsdStageRefPtr& stage,
-                               const std::string& primPath,
-                               const std::vector<PointCloudTileAsset>& tiles,
-                               const PointCloudPayloadOptions& options,
-                               GeneratedPayloadSet& payloads);
+// Authors payload-backed tiles whose payload names `payloads` has declared,
+// writing each payload where the generation stages it. Manifest entries are
+// appended to `manifestEntries` and name the staged payloads until
+// CommitTilePayloads repoints them.
+bool AuthorClaimedTilePayloads(
+    const pxr::UsdStageRefPtr& stage,
+    const std::string& primPath,
+    const std::vector<PointCloudTileAsset>& tiles,
+    const PointCloudPayloadOptions& options,
+    PayloadGeneration& payloads,
+    std::vector<usdpointcloud::PointTileManifestEntry>& manifestEntries);
+
+// Publishes `payloads`, then points the payload arcs in `layer` and the
+// manifest entries at the published generation instead of the staging
+// directory.
+bool CommitTilePayloads(
+    const pxr::SdfLayerHandle& layer,
+    PayloadGeneration& payloads,
+    std::vector<usdpointcloud::PointTileManifestEntry>& manifestEntries,
+    std::string& error);
+
+// Replaces one exact path component in every payload asset path in `layer`.
+void RepointPayloads(const pxr::SdfLayerHandle& layer,
+                     const std::string& fromComponent,
+                     const std::string& toComponent);
 
 } // namespace usdgeo::detail

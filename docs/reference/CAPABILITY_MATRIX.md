@@ -198,7 +198,7 @@ reported separately, because they differ.
 | Bounded-memory generation during file open | Implemented for LAS, LAZ, COPC, and PLY tiled reads; generated-corpus benchmark available | Source streams, spool buffers, and one-tile reconstruction are bounded; generated-corpus and checked-in real-data measurements are available |
 | LOD file-format arguments | n/a | `lod=off\|preview\|balanced\|quality` |
 | Spatial tile file-format arguments | n/a | `tile=true`, `tileSize`, `tileMemoryLimit`, `payloadDirectory` for LAS, LAZ, COPC, and PLY |
-| Reopening a tiled read over its own payloads | Supported when the caller names a payload owner | Supported: a read replaces the payloads its layer generated before and refuses any file it did not generate; see [payload ownership](../architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership) |
+| Reopening a tiled read over its own payloads | Supported when the caller names a payload owner | Supported: each layer publishes immutable payload generations in a directory of its own, reusing identical content; see [payload ownership](../architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership) |
 
 With `lod=off` every read authors one `UsdGeomPoints` prim at `/PointCloud`.
 The other profiles author a single non-tiled `usdLod` root with fixed-stride

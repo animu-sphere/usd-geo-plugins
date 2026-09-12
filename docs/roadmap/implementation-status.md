@@ -414,13 +414,18 @@ remain be explicit.
       report `Could not open asset` for their own payloads.
 - [x] Move COPC native-hierarchy tiled authoring onto a layer-level shared
       entry point, so no adapter creates a stage or transfers layer content
-- [x] Record ownership of FileFormat-generated payloads by layer identity.
-      Reading a tiled layer again regenerates its own payloads instead of
-      failing on them, a file it did not generate still refuses the write, and
-      an interrupted read leaves files the next read replaces; see
+- [x] Give every FileFormat-generated payload set a directory owned by its
+      layer, keyed by the source relative to the payload directory and the
+      exact file-format arguments. Reading a tiled layer again no longer fails
+      on its earlier payloads, and never touches another layer's or a user's
+      files; see
       [payload ownership](../architecture/FILE_FORMAT_ARGUMENTS.md#generated-payload-ownership)
-- [x] Apply the same ownership to generated-cache materialization, replacing
-      stale owned payloads instead of keeping whatever file is already present
+- [x] Stage each payload generation privately and publish it by renaming it
+      into place, reusing identical content, so a failed, cancelled, or
+      interrupted read never modifies payloads a root already references
+- [x] Materialize generated-cache hits as a generation named by the cache
+      entry, reusing an intact copy without writing and replacing a damaged
+      one
 - [ ] Give tile spools an owned, recoverable working location instead of
       timestamped directories in the system temporary directory, which an
       interrupted process leaves behind
